@@ -1,0 +1,976 @@
+// ==UserScript==
+// @name         AI网页内容总结
+// @namespace    https://linux.do/u/f-droid
+// @version      3.1
+// @description  支持多语言和使用自定义API总结网页内容的AI网页内容总结脚本。
+// @author       F-Droid,xbaxb
+// @icon         https://linux.do/user_avatar/linux.do/f-droid/144/228666_2.png
+// @match        *://*/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @connect      *
+// @require      https://cdn.jsdelivr.net/npm/marked/marked.min.js
+// @license      MIT
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const DEFAULT_CONFIG_NAME = '默认配置';
+    const DEFAULT_CONFIG = {
+        API_URL: 'https://api.openai.com/v1/chat/completions',
+        API_KEY: 'yourapikey',
+        MAX_TOKENS: 8192,
+        MODEL: 'gpt-4o',
+        TEMPERATURE: 0.5,
+        PROMPT: '请总结以下内容，简要概括主要观点和重要细节，不要进行任何对话形式的回答。',
+        LANGUAGE: '自动',
+        RETRY_COUNT: 3,
+        RETRY_INTERVAL: 3000,
+        DARK_MODE: false,
+    };
+
+    let CONFIGS = loadConfigs();
+    let currentConfigName = getCurrentConfigName();
+    let CONFIG = CONFIGS[currentConfigName] || DEFAULT_CONFIG;
+    let lastSummaryMarkdown = '';
+
+    // 确保脚本只在顶层窗口中运行
+    if (window.top === window.self) {
+        // 检查按钮是否已经存在
+        let summaryButton = document.getElementById('summaryButton');
+        let mainButton = document.getElementById('mainButton');
+
+        if (!summaryButton) {
+            summaryButton = document.createElement('button');
+            summaryButton.id = 'summaryButton';
+            summaryButton.textContent = '总结网页';
+            summaryButton.style.position = 'fixed';
+            summaryButton.style.bottom = '20px';
+            summaryButton.style.right = '170px';
+            summaryButton.style.backgroundColor = '#28A745';
+            summaryButton.style.color = 'white';
+            summaryButton.style.border = 'none';
+            summaryButton.style.borderRadius = '5px';
+            summaryButton.style.padding = '10px 20px';
+            summaryButton.style.cursor = 'pointer';
+            summaryButton.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.2)';
+            summaryButton.style.zIndex = 1000;
+            document.body.appendChild(summaryButton);
+        }
+
+        if (!mainButton) {
+            mainButton = document.createElement('button');
+            mainButton.id = 'mainButton';
+            mainButton.textContent = '控制面板';
+            mainButton.style.position = 'fixed';
+            mainButton.style.bottom = '20px';
+            mainButton.style.right = '40px';
+            mainButton.style.backgroundColor = '#007BFF';
+            mainButton.style.color = 'white';
+            mainButton.style.border = 'none';
+            mainButton.style.borderRadius = '5px';
+            mainButton.style.padding = '10px 20px';
+            mainButton.style.cursor = 'pointer';
+            mainButton.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.2)';
+            mainButton.style.zIndex = 1000;
+            document.body.appendChild(mainButton);
+        }
+    }
+
+    const panel = document.createElement('div');
+    panel.style.display = 'none';
+    panel.style.position = 'fixed';
+    panel.style.top = '50%';
+    panel.style.left = '50%';
+    panel.style.transform = 'translate(-50%, -50%)';
+    panel.style.backgroundColor = 'white';
+    panel.style.padding = '20px';
+    panel.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.3)';
+    panel.style.zIndex = 1001;
+    panel.style.width = '65%';
+    panel.style.height = '65%';
+    panel.style.borderRadius = '10px';
+    panel.style.overflowY = 'auto';
+    document.body.appendChild(panel);
+
+    const mainView = document.createElement('div');
+    mainView.style.display = 'flex';
+    mainView.style.flexDirection = 'column';
+    mainView.style.height = '100%';
+    mainView.style.position = 'relative';
+
+    const settingsView = document.createElement('div');
+    settingsView.style.display = 'none';
+    settingsView.style.width = '95%';
+    settingsView.style.height = '85%';
+    settingsView.style.margin = '0 auto';
+    settingsView.style.overflowY = 'auto';
+    settingsView.style.padding = '20px';
+    settingsView.style.display = 'flex';
+    settingsView.style.flexDirection = 'column';
+    settingsView.style.alignItems = 'center';
+
+    panel.appendChild(mainView);
+    panel.appendChild(settingsView);
+
+   
+const createPanelHeader = (titleText, onClose) => {
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+
+        const title = document.createElement('h3');
+        title.textContent = titleText;
+        title.style.marginBottom = '15px';
+        title.style.textAlign = 'center';
+        header.appendChild(title);
+
+        const closeButton = document.createElement('button');
+        closeButton.textContent = '关闭';
+        closeButton.style.backgroundColor = '#6C757D';
+        closeButton.style.color = 'white';
+        closeButton.style.border = 'none';
+        closeButton.style.padding = '5px 10px';
+        closeButton.style.borderRadius = '5px';
+        closeButton.style.cursor = 'pointer';
+        closeButton.addEventListener('click', onClose);
+        header.appendChild(closeButton);
+
+        return header;
+    };
+
+    mainView.appendChild(createPanelHeader('AI总结控制面板', () => {
+        panel.style.display = 'none';
+    }));
+
+    const buttonContainer = document.createElement('div');
+    buttonContainer.style.display = 'flex';
+    buttonContainer.style.justifyContent = 'center';
+    buttonContainer.style.gap = '10px';
+    buttonContainer.style.marginBottom = '15px';
+    mainView.appendChild(buttonContainer);
+
+    const panelSummaryButton = document.createElement('button');
+    panelSummaryButton.textContent = '获取网页总结';
+    panelSummaryButton.style.backgroundColor = '#28A745';
+    panelSummaryButton.style.color = 'white';
+    panelSummaryButton.style.border = 'none';
+    panelSummaryButton.style.padding = '10px 15px';
+    panelSummaryButton.style.borderRadius = '5px';
+    panelSummaryButton.style.cursor = 'pointer';
+    buttonContainer.appendChild(panelSummaryButton);
+
+    const settingsButton = document.createElement('button');
+    settingsButton.textContent = '设置';
+    settingsButton.style.backgroundColor = '#FFC107';
+    settingsButton.style.color = 'white';
+    settingsButton.style.border = 'none';
+    settingsButton.style.padding = '10px 15px';
+    settingsButton.style.borderRadius = '5px';
+    settingsButton.style.cursor = 'pointer';
+    settingsButton.addEventListener('click', () => {
+        mainView.style.display = 'none';
+        settingsView.style.display = 'block';
+    });
+    buttonContainer.appendChild(settingsButton);
+
+    const darkModeButton = document.createElement('button');
+    darkModeButton.textContent = '切换暗色模式';
+    darkModeButton.style.backgroundColor = '#6C757D';
+    darkModeButton.style.color = 'white';
+    darkModeButton.style.border = 'none';
+    darkModeButton.style.padding = '10px 15px';
+    darkModeButton.style.borderRadius = '5px';
+    darkModeButton.style.cursor = 'pointer';
+    buttonContainer.appendChild(darkModeButton);
+
+    const resultArea = document.createElement('div');
+    resultArea.style.width = '100%';
+    resultArea.style.flex = '1';
+    resultArea.style.marginTop = '10px';
+    resultArea.style.marginBottom = '15px'; 
+    resultArea.style.borderRadius = '5px';
+    resultArea.style.border = '1px solid #ced4da';
+    resultArea.style.padding = '10px';
+    resultArea.style.boxSizing = 'border-box';
+    resultArea.style.overflowY = 'auto';
+    mainView.appendChild(resultArea);
+
+    const copyButton = document.createElement('button');
+    copyButton.textContent = '复制总结';
+    copyButton.style.backgroundColor = '#007BFF';
+    copyButton.style.color = 'white';
+    copyButton.style.border = 'none';
+    copyButton.style.padding = '10px 20px';
+    copyButton.style.marginTop = '10px';
+    copyButton.style.marginBottom = '20px';
+    copyButton.style.borderRadius = '5px';
+    copyButton.style.cursor = 'pointer';
+    mainView.appendChild(copyButton);
+
+    const footer = document.createElement('div');
+    footer.style.width = '100%';
+    footer.style.textAlign = 'center';
+    footer.style.padding = '10px';
+    footer.style.marginTop = 'auto';
+    footer.style.position = 'relative';
+    footer.style.bottom = '0';
+    footer.innerHTML = `© ${new Date().getFullYear()} <a href="https://linux.do/u/f-droid" target="_blank" style="color: #007BFF; text-decoration: none;">F-Droid</a>. All rights reserved.<br>如果您喜欢这个工具，请给作者点个赞吧！😊`;
+    mainView.appendChild(footer);
+
+    settingsView.appendChild(createPanelHeader('设置', () => {
+        settingsView.style.display = 'none';
+        mainView.style.display = 'flex';
+        mainView.style.flexDirection = 'column';
+        mainView.style.height = '100%';
+    }));
+
+    const form = document.createElement('form');
+    form.style.display = 'flex';
+    form.style.flexDirection = 'column';
+    form.style.rowGap = '10px';
+    form.style.padding = '0 20px';
+    form.style.maxWidth = '1000px';
+    form.style.margin = '0 auto';
+    settingsView.appendChild(form);
+
+    const configSelectButton = document.createElement('button');
+    configSelectButton.textContent = '选择配置';
+    configSelectButton.style.backgroundColor = '#007BFF';
+    configSelectButton.style.color = 'white';
+    configSelectButton.style.border = 'none';
+    configSelectButton.style.padding = '10px 20px';
+    configSelectButton.style.borderRadius = '5px';
+    configSelectButton.style.cursor = 'pointer';
+    configSelectButton.style.marginTop = '15px';
+    configSelectButton.style.marginBottom = '10px';
+    configSelectButton.addEventListener('click', () => {
+        showConfigSelectDialog();
+    });
+    form.appendChild(configSelectButton);
+
+    const createInputField = (labelText, inputName, inputType = 'text', placeholder = '', value = '') => {
+        const fieldContainer = document.createElement('div');
+        fieldContainer.style.display = 'flex';
+        fieldContainer.style.flexDirection = 'column';
+        fieldContainer.style.marginBottom = '15px';
+        fieldContainer.style.position = 'relative';
+
+        const label = document.createElement('label');
+        label.textContent = labelText;
+        label.htmlFor = inputName;
+        label.style.marginBottom = '5px';
+
+        const input = document.createElement('input');
+        input.type = inputType;
+        input.name = inputName;
+        input.placeholder = placeholder;
+        input.value = value;
+        input.style.padding = '10px';
+        input.style.border = '1px solid #ced4da';
+        input.style.borderRadius = '5px';
+        input.style.width = '100%';
+        input.style.boxSizing = 'border-box';
+
+        if (inputName === 'api_key') {
+            const toggleVisibilityButton = document.createElement('button');
+            toggleVisibilityButton.textContent = '👁️';
+            toggleVisibilityButton.style.position = 'absolute';
+            toggleVisibilityButton.style.right = '10px';
+            toggleVisibilityButton.style.top = '35px';
+            toggleVisibilityButton.style.border = 'none';
+            toggleVisibilityButton.style.background = 'none';
+            toggleVisibilityButton.style.cursor = 'pointer';
+            toggleVisibilityButton.addEventListener('click', (event) => {
+                event.preventDefault();
+                input.type = input.type === 'password' ? 'text' : 'password';
+            });
+            fieldContainer.appendChild(toggleVisibilityButton);
+        }
+
+        fieldContainer.appendChild(label);
+        fieldContainer.appendChild(input);
+
+        return fieldContainer;
+    };
+
+    form.appendChild(createInputField('API地址', 'api_url', 'text', '请输入您的API地址', CONFIG.API_URL));
+    form.appendChild(createInputField('API密钥', 'api_key', 'password', '请输入您的API密钥', CONFIG.API_KEY));
+    form.appendChild(createInputField('AI模型', 'model', 'text', '请输入AI模型名称', CONFIG.MODEL));
+    form.appendChild(createInputField('最大字数', 'max_tokens', 'number', '请输入最大字数', CONFIG.MAX_TOKENS));
+    form.appendChild(createInputField('温度', 'temperature', 'number', '请输入温度（0到1之间）', CONFIG.TEMPERATURE));
+    form.appendChild(createInputField('提示词', 'prompt', 'text', '请输入新的总结提示词', CONFIG.PROMPT));
+    form.appendChild(createInputField('总结语言', 'language', 'text', '请输入总结语言（默认自动）', CONFIG.LANGUAGE));
+    form.appendChild(createInputField('重试次数', 'retry_count', 'number', '请输入重试次数', CONFIG.RETRY_COUNT));
+    form.appendChild(createInputField('重试间隔（毫秒）', 'retry_interval', 'number', '请输入重试间隔', CONFIG.RETRY_INTERVAL));
+
+    const buttonGroup = document.createElement('div');
+    buttonGroup.style.display = 'flex';
+    buttonGroup.style.justifyContent = 'flex-start';
+    buttonGroup.style.gap = '10px';
+    buttonGroup.style.maxWidth = '1000px';
+    buttonGroup.style.margin = '0 auto';
+    buttonGroup.style.padding = '0 20px';
+    settingsView.appendChild(buttonGroup);
+
+    const saveButton = document.createElement('button');
+    saveButton.textContent = '保存设置';
+    saveButton.style.backgroundColor = '#007BFF';
+    saveButton.style.color = 'white';
+    saveButton.style.border = 'none';
+    saveButton.style.padding = '10px 20px';
+    saveButton.style.borderRadius = '5px';
+    saveButton.style.cursor = 'pointer';
+    buttonGroup.appendChild(saveButton);
+
+    const addConfigButton = document.createElement('button');
+    addConfigButton.textContent = '添加新配置';
+    addConfigButton.style.backgroundColor = '#28A745';
+    addConfigButton.style.color = 'white';
+    addConfigButton.style.border = 'none';
+    addConfigButton.style.padding = '10px 20px';
+    addConfigButton.style.borderRadius = '5px';
+    addConfigButton.style.cursor = 'pointer';
+    buttonGroup.appendChild(addConfigButton);
+
+    const renameButton = document.createElement('button');
+    renameButton.textContent = '重命名配置';
+    renameButton.style.backgroundColor = '#FFC107';
+    renameButton.style.color = 'white';
+    renameButton.style.border = 'none';
+    renameButton.style.padding = '10px 20px';
+    renameButton.style.borderRadius = '5px';
+    renameButton.style.cursor = 'pointer';
+    buttonGroup.appendChild(renameButton);
+
+    const deleteButton = document.createElement('button');
+    deleteButton.textContent = '删除配置';
+    deleteButton.style.backgroundColor = '#DC3545';
+    deleteButton.style.color = 'white';
+    deleteButton.style.border = 'none';
+    deleteButton.style.padding = '10px 20px';
+    deleteButton.style.borderRadius = '5px';
+    deleteButton.style.cursor = 'pointer';
+    buttonGroup.appendChild(deleteButton);
+
+    const applyButton = document.createElement('button');
+    applyButton.textContent = '应用配置';
+    applyButton.style.backgroundColor = '#17A2B8';
+    applyButton.style.color = 'white';
+    applyButton.style.border = 'none';
+    applyButton.style.padding = '10px 20px';
+    applyButton.style.borderRadius = '5px';
+    applyButton.style.cursor = 'pointer';
+    buttonGroup.appendChild(applyButton);
+
+    mainButton.addEventListener('click', () => {
+        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        if (panel.style.display === 'block') {
+            applyDarkMode();
+        }
+    });
+
+    summaryButton.addEventListener('click', async () => {
+        try {
+            const pageContent = getPageContent();
+            showInfoDialog('正在提取网页内容总结，请稍候...', true, '处理中');
+            const summary = await summarizeWithRetries(pageContent);
+            lastSummaryMarkdown = summary;
+            resultArea.innerHTML = marked.parse(summary);
+            panel.style.display = 'block';
+        } catch (error) {
+            showErrorDialog(error.message);
+        }
+    });
+
+    panelSummaryButton.addEventListener('click', async () => {
+        try {
+            const pageContent = getPageContent();
+            showInfoDialog('正在提取网页内容...', true, '处理中');
+            const summary = await summarizeWithRetries(pageContent);
+            lastSummaryMarkdown = summary;
+            resultArea.innerHTML = marked.parse(summary);
+        } catch (error) {
+            showErrorDialog(error.message);
+        }
+    });
+
+    saveButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        const formData = new FormData(form);
+
+        CONFIG.API_URL = formData.get('api_url');
+        CONFIG.API_KEY = formData.get('api_key');
+        CONFIG.MODEL = formData.get('model');
+        CONFIG.MAX_TOKENS = parseInt(formData.get('max_tokens'), 10);
+        CONFIG.TEMPERATURE = parseFloat(formData.get('temperature'));
+        CONFIG.PROMPT = formData.get('prompt');
+        CONFIG.LANGUAGE = formData.get('language');
+        CONFIG.RETRY_COUNT = parseInt(formData.get('retry_count'), 10);
+        CONFIG.RETRY_INTERVAL = parseInt(formData.get('retry_interval'), 10);
+
+        CONFIGS[currentConfigName] = CONFIG;
+        saveConfigs(CONFIGS);
+        showInfoDialog('设置已更新。', true);
+    });
+
+    addConfigButton.addEventListener('click', () => {
+        showInputDialog('请输入新配置名称：', `配置${Object.keys(CONFIGS).length + 1}`, (newConfigName) => {
+            if (newConfigName && !CONFIGS[newConfigName]) {
+                CONFIGS[newConfigName] = { ...DEFAULT_CONFIG };
+                currentConfigName = newConfigName;
+                CONFIG = CONFIGS[currentConfigName];
+                saveConfigs(CONFIGS);
+                updateConfigSelect();
+                updateFormFields();
+                showInfoDialog('新配置已添加。', true);
+            }
+        });
+    });
+
+    renameButton.addEventListener('click', () => {
+        if (currentConfigName !== DEFAULT_CONFIG_NAME) {
+            showInputDialog('请输入新的配置名称：', currentConfigName, (newName) => {
+                if (newName && newName !== currentConfigName && !CONFIGS[newName]) {
+                    CONFIGS[newName] = CONFIGS[currentConfigName];
+                    delete CONFIGS[currentConfigName];
+                    currentConfigName = newName;
+                    saveConfigs(CONFIGS);
+                    updateConfigSelect();
+                    showInfoDialog('配置已重命名。', true);
+                }
+            });
+        } else {
+            showInfoDialog('默认配置无法重命名。', true);
+        }
+    });
+
+    deleteButton.addEventListener('click', () => {
+        if (currentConfigName !== DEFAULT_CONFIG_NAME) {
+            showConfirmDialog(`确定要删除配置 "${currentConfigName}" 吗？`, () => {
+                delete CONFIGS[currentConfigName];
+                currentConfigName = DEFAULT_CONFIG_NAME;
+                CONFIG = CONFIGS[currentConfigName];
+                saveConfigs(CONFIGS);
+                updateConfigSelect();
+                updateFormFields();
+                showInfoDialog(`配置已删除，已切换到默认配置。`, true);
+            });
+        } else {
+            showInfoDialog('默认配置无法删除。', true);
+        }
+    });
+
+    applyButton.addEventListener('click', () => {
+        setCurrentConfigName(currentConfigName);
+        showInfoDialog('当前配置已应用，下次启动将使用此配置。', true);
+    });
+
+    copyButton.addEventListener('click', () => {
+        navigator.clipboard.writeText(lastSummaryMarkdown).then(() => {
+            showInfoDialog('总结内容已复制到剪贴板（Markdown格式）。', true);
+        }).catch(() => {
+            showInfoDialog('复制失败，请手动复制内容。', true);
+        });
+    });
+
+    darkModeButton.addEventListener('click', toggleDarkMode);
+
+    function showConfigSelectDialog() {
+        const dialog = document.createElement('div');
+        dialog.classList.add('ai-summary-dialog');
+        dialog.style.position = 'fixed';
+        dialog.style.top = '50%';
+        dialog.style.left = '50%';
+        dialog.style.transform = 'translate(-50%, -50%)';
+        dialog.style.backgroundColor = CONFIG.DARK_MODE ? '#1a1a1a' : 'white';
+        dialog.style.color = CONFIG.DARK_MODE ? '#ffffff' : '#000000';
+        dialog.style.padding = '20px';
+        dialog.style.boxShadow = CONFIG.DARK_MODE ? 
+            '0 0 10px rgba(255, 255, 255, 0.1)' : 
+            '0 0 10px rgba(0, 0, 0, 0.3)';
+        dialog.style.zIndex = 1002;
+        dialog.style.width = '50%';
+        dialog.style.maxWidth = '500px';
+        dialog.style.borderRadius = '10px';
+        dialog.style.textAlign = 'center';
+        dialog.style.webkitBackdropFilter = 'blur(5px)';
+        dialog.style.backdropFilter = 'blur(5px)';
+
+        const dialogHeader = createPanelHeader('选择配置', () => {
+            dialog.remove();
+        });
+        dialogHeader.style.color = CONFIG.DARK_MODE ? '#ffffff' : '#000000';
+        dialog.appendChild(dialogHeader);
+
+        const configList = document.createElement('div');
+        configList.style.display = 'flex';
+        configList.style.flexDirection = 'column';
+        configList.style.alignItems = 'center';
+        configList.style.maxHeight = '200px';
+        configList.style.overflowY = 'auto';
+        configList.style.marginBottom = '15px';
+        configList.style.padding = '10px';
+        configList.style.backgroundColor = CONFIG.DARK_MODE ? '#2d2d2d' : '#f8f9fa';
+        configList.style.borderRadius = '5px';
+
+        Object.keys(CONFIGS).forEach(name => {
+            const configItem = document.createElement('button');
+            configItem.textContent = name;
+            configItem.style.padding = '10px';
+            configItem.style.marginBottom = '5px';
+            configItem.style.border = `1px solid ${CONFIG.DARK_MODE ? '#404040' : '#ced4da'}`;
+            configItem.style.borderRadius = '5px';
+            configItem.style.width = '80%';
+            configItem.style.cursor = 'pointer';
+            configItem.style.transition = 'all 0.3s ease';
+            
+            // 设置按钮颜色
+            if (name === currentConfigName) {
+                configItem.style.backgroundColor = CONFIG.DARK_MODE ? '#404040' : '#007BFF';
+                configItem.style.color = '#ffffff';
+            } else {
+                configItem.style.backgroundColor = CONFIG.DARK_MODE ? '#2d2d2d' : '#f8f9fa';
+                configItem.style.color = CONFIG.DARK_MODE ? '#ffffff' : '#000000';
+            }
+
+            // 添加悬停效果
+            configItem.addEventListener('mouseover', () => {
+                if (name !== currentConfigName) {
+                    configItem.style.backgroundColor = CONFIG.DARK_MODE ? '#353535' : '#e9ecef';
+                }
+            });
+
+            configItem.addEventListener('mouseout', () => {
+                if (name !== currentConfigName) {
+                    configItem.style.backgroundColor = CONFIG.DARK_MODE ? '#2d2d2d' : '#f8f9fa';
+                }
+            });
+
+            configItem.addEventListener('click', () => {
+                currentConfigName = name;
+                CONFIG = CONFIGS[currentConfigName];
+                updateFormFields();
+                dialog.remove();
+                showInfoDialog(`已选择配置：${name}`, true);
+            });
+            configList.appendChild(configItem);
+        });
+
+        // 添加渐入效果
+        dialog.style.opacity = '0';
+        dialog.style.transition = 'opacity 0.3s ease-in-out';
+        
+        dialog.appendChild(configList);
+        document.body.appendChild(dialog);
+        
+        // 强制重绘以触发过渡效果
+        dialog.offsetHeight;
+        dialog.style.opacity = '1';
+    }
+
+    function updateFormFields() {
+        form.elements.api_url.value = CONFIG.API_URL;
+        form.elements.api_key.value = CONFIG.API_KEY;
+        form.elements.model.value = CONFIG.MODEL;
+        form.elements.max_tokens.value = CONFIG.MAX_TOKENS;
+        form.elements.temperature.value = CONFIG.TEMPERATURE;
+        form.elements.prompt.value = CONFIG.PROMPT;
+        form.elements.language.value = CONFIG.LANGUAGE;
+        form.elements.retry_count.value = CONFIG.RETRY_COUNT;
+        form.elements.retry_interval.value = CONFIG.RETRY_INTERVAL;
+    }
+
+    function showErrorDialog(message) {
+        showInfoDialog(message, false, '错误');
+    }
+
+    function showInfoDialog(message, autoClose = false, title = '信息') {
+        // 移除所有现有的信息弹窗
+        const existingDialogs = document.querySelectorAll('.ai-summary-dialog');
+        existingDialogs.forEach(dialog => dialog.remove());
+
+        const dialog = document.createElement('div');
+        dialog.classList.add('ai-summary-dialog');
+        dialog.style.position = 'fixed';
+        dialog.style.top = '50%';
+        dialog.style.left = '50%';
+        dialog.style.transform = 'translate(-50%, -50%)';
+        dialog.style.backgroundColor = CONFIG.DARK_MODE ? '#1a1a1a' : 'white';
+        dialog.style.color = CONFIG.DARK_MODE ? '#ffffff' : '#000000';
+        dialog.style.padding = '20px';
+        dialog.style.boxShadow = CONFIG.DARK_MODE ? 
+            '0 0 10px rgba(255, 255, 255, 0.1)' : 
+            '0 0 10px rgba(0, 0, 0, 0.3)';
+        dialog.style.zIndex = 1002;
+        dialog.style.width = '50%';
+        dialog.style.maxWidth = '500px';
+        dialog.style.borderRadius = '10px';
+        dialog.style.textAlign = 'center';
+        dialog.style.webkitBackdropFilter = 'blur(5px)';
+        dialog.style.backdropFilter = 'blur(5px)';
+
+        const dialogHeader = createPanelHeader(title, () => {
+            dialog.style.opacity = '0';
+            setTimeout(() => dialog.remove(), 300);
+        });
+        dialogHeader.style.color = CONFIG.DARK_MODE ? '#ffffff' : '#000000';
+        dialog.appendChild(dialogHeader);
+
+        const messagePara = document.createElement('p');
+        messagePara.textContent = message;
+        messagePara.style.margin = '15px 0';
+        dialog.appendChild(messagePara);
+
+        const returnButton = document.createElement('button');
+        returnButton.textContent = '返回面板';
+        returnButton.style.backgroundColor = CONFIG.DARK_MODE ? '#2d2d2d' : '#007BFF';
+        returnButton.style.color = '#ffffff';
+        returnButton.style.border = 'none';
+        returnButton.style.padding = '10px 20px';
+        returnButton.style.borderRadius = '5px';
+        returnButton.style.cursor = 'pointer';
+        returnButton.style.marginTop = '15px';
+        returnButton.style.transition = 'background-color 0.3s';
+        
+        returnButton.addEventListener('mouseover', () => {
+            returnButton.style.backgroundColor = CONFIG.DARK_MODE ? '#404040' : '#0056b3';
+        });
+        returnButton.addEventListener('mouseout', () => {
+            returnButton.style.backgroundColor = CONFIG.DARK_MODE ? '#2d2d2d' : '#007BFF';
+        });
+        
+        returnButton.addEventListener('click', () => {
+            dialog.style.opacity = '0';
+            setTimeout(() => {
+                dialog.remove();
+                panel.style.display = 'block';
+            }, 300);
+        });
+        dialog.appendChild(returnButton);
+
+        dialog.style.opacity = '0';
+        dialog.style.transition = 'opacity 0.3s ease-in-out';
+        document.body.appendChild(dialog);
+        
+        dialog.offsetHeight; // 强制重绘
+        dialog.style.opacity = '1';
+
+        if (autoClose) {
+            setTimeout(() => {
+                dialog.style.opacity = '0';
+                setTimeout(() => dialog.remove(), 300);
+            }, 2700);
+        }
+
+        // 添加清理函数
+        return () => {
+            if (document.body.contains(dialog)) {
+                dialog.style.opacity = '0';
+                setTimeout(() => dialog.remove(), 300);
+            }
+        };
+    }
+
+    function showInputDialog(title, defaultValue, callback) {
+        const dialog = document.createElement('div');
+        dialog.style.position = 'fixed';
+        dialog.style.top = '50%';
+        dialog.style.left = '50%';
+        dialog.style.transform = 'translate(-50%, -50%)';
+        dialog.style.backgroundColor = 'white';
+        dialog.style.padding = '20px';
+        dialog.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.3)';
+        dialog.style.zIndex = 1002;
+        dialog.style.width = '50%';
+        dialog.style.borderRadius = '10px';
+        dialog.style.textAlign = 'center';
+
+        const dialogHeader = createPanelHeader(title, () => {
+            dialog.remove();
+        });
+        dialog.appendChild(dialogHeader);
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = defaultValue;
+        input.style.padding = '10px';
+        input.style.border = '1px solid #ced4da';
+        input.style.borderRadius = '5px';
+        input.style.width = '80%';
+        input.style.marginBottom = '15px';
+        dialog.appendChild(input);
+
+        const confirmButton = document.createElement('button');
+        confirmButton.textContent = '确认';
+        confirmButton.style.backgroundColor = '#007BFF';
+        confirmButton.style.color = 'white';
+        confirmButton.style.border = 'none';
+        confirmButton.style.padding = '10px 20px';
+        confirmButton.style.borderRadius = '5px';
+        confirmButton.style.cursor = 'pointer';
+        confirmButton.addEventListener('click', () => {
+            callback(input.value);
+            dialog.remove();
+        });
+        dialog.appendChild(confirmButton);
+
+        document.body.appendChild(dialog);
+    }
+
+    function showConfirmDialog(message, callback) {
+        const dialog = document.createElement('div');
+        dialog.style.position = 'fixed';
+        dialog.style.top = '50%';
+        dialog.style.left = '50%';
+        dialog.style.transform = 'translate(-50%, -50%)';
+        dialog.style.backgroundColor = 'white';
+        dialog.style.padding = '20px';
+        dialog.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.3)';
+        dialog.style.zIndex = 1002;
+        dialog.style.width = '50%';
+        dialog.style.borderRadius = '10px';
+        dialog.style.textAlign = 'center';
+
+        const dialogHeader = createPanelHeader('确认', () => {
+            dialog.remove();
+        });
+        dialog.appendChild(dialogHeader);
+
+        const messagePara = document.createElement('p');
+        messagePara.textContent = message;
+        dialog.appendChild(messagePara);
+
+        const confirmButton = document.createElement('button');
+        confirmButton.textContent = '确认';
+        confirmButton.style.backgroundColor = '#007BFF';
+        confirmButton.style.color = 'white';
+        confirmButton.style.border = 'none';
+        confirmButton.style.padding = '10px 20px';
+        confirmButton.style.borderRadius = '5px';
+        confirmButton.style.cursor = 'pointer';
+        confirmButton.addEventListener('click', () => {
+            callback();
+            dialog.remove();
+        });
+        dialog.appendChild(confirmButton);
+
+        document.body.appendChild(dialog);
+    }
+
+    function getPageContent() {
+        const title = document.title;
+        const bodyText = document.body.innerText;
+        return `${title}\n\n${bodyText}`;
+    }
+
+    async function summarizeWithRetries(content) {
+        let attempts = 0;
+        const cleanupDialog = showInfoDialog('正在获取网页内容总结，请稍候...', false, '处理中');
+        
+        while (attempts < CONFIG.RETRY_COUNT) {
+            try {
+                const summary = await summarizeContent(content);
+                cleanupDialog(); // 清除"处理中"对话框
+                return summary;  // 移除了成功提示
+            } catch (error) {
+                if (attempts < CONFIG.RETRY_COUNT - 1) {
+                    cleanupDialog(); // 清除之前的对话框
+                    const retryCleanup = showInfoDialog(`第 ${attempts + 1} 次尝试失败，正在重试...`, false, '重试中');
+                    await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_INTERVAL));
+                    retryCleanup();
+                } else {
+                    cleanupDialog(); // 清除之前的对话框
+                    throw new Error('所有重试均失败，请稍后再试。');
+                }
+            }
+            attempts++;
+        }
+    }
+
+    async function summarizeContent(content) {
+        const languageSetting = CONFIG.LANGUAGE !== '自动' ? `请用${CONFIG.LANGUAGE}总结。` : '';
+        const promptWithLanguage = `${CONFIG.PROMPT} ${languageSetting}`;
+
+        const response = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                showInfoDialog('请求超时，请检查网络连接。', false, '错误');
+                reject(new Error('请求超时'));
+            }, 60000);
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: CONFIG.API_URL,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${CONFIG.API_KEY}`
+                },
+                data: JSON.stringify({
+                    model: CONFIG.MODEL,
+                    messages: [
+                        { role: 'system', content: promptWithLanguage },
+                        { role: 'user', content: content }
+                    ],
+                    max_tokens: CONFIG.MAX_TOKENS,
+                    temperature: CONFIG.TEMPERATURE
+                }),
+                onload: response => {
+                    clearTimeout(timeout);
+                    if (response.status === 429) {
+                        showInfoDialog('API 请求次数超限，请稍后再试。', false, '错误');
+                        reject(new Error('请求次数太多，请稍后再试。'));
+                    } else if (response.status >= 200 && response.status < 300) {
+                        try {
+                            const data = JSON.parse(response.responseText);
+                            resolve(data);
+                        } catch (e) {
+                            showInfoDialog('服务器响应格式错误，请重试。', false, '错误');
+                            reject(new Error('无法解析响应'));
+                        }
+                    } else {
+                        showInfoDialog(`请求失败，状态码: ${response.status}`, false, '错误');
+                        reject(new Error(`状态码: ${response.status}`));
+                    }
+                },
+                onerror: () => {
+                    clearTimeout(timeout);
+                    showInfoDialog('网络请求失败，请检查网络连接。', false, '错误');
+                    reject(new Error('请求失败，请检查您的网络连接。'));
+                }
+            });
+        });
+
+        if (response.choices && response.choices[0] && response.choices[0].message) {
+            return response.choices[0].message.content;
+        } else {
+            showInfoDialog('AI 响应格式错误，请重试。', false, '错误');
+            throw new Error('响应格式错误');
+        }
+    }
+
+    function loadConfigs() {
+        return GM_getValue('CONFIGS', { [DEFAULT_CONFIG_NAME]: DEFAULT_CONFIG });
+    }
+
+    function saveConfigs(configs) {
+        GM_setValue('CONFIGS', configs);
+    }
+
+    function getCurrentConfigName() {
+        return GM_getValue('CURRENT_CONFIG_NAME', DEFAULT_CONFIG_NAME);
+    }
+
+    function setCurrentConfigName(name) {
+        GM_setValue('CURRENT_CONFIG_NAME', name);
+    }
+
+    function toggleDarkMode() {
+        CONFIG.DARK_MODE = !CONFIG.DARK_MODE;
+        CONFIGS[currentConfigName] = CONFIG;
+        saveConfigs(CONFIGS);
+        applyDarkMode();
+    }
+
+    function applyDarkMode() {
+        const darkModeColors = {
+            background: '#1a1a1a',
+            text: '#ffffff',
+            inputBg: '#2d2d2d',
+            border: '#404040',
+            link: '#66b3ff',
+            buttonHover: '#404040'
+        };
+
+        const lightModeColors = {
+            background: '#ffffff',
+            text: '#000000',
+            inputBg: '#ffffff',
+            border: '#ced4da',
+            link: '#007BFF',
+            buttonHover: '#0056b3'
+        };
+
+        const colors = CONFIG.DARK_MODE ? darkModeColors : lightModeColors;
+
+        // 更新主面板样式
+        panel.style.backgroundColor = colors.background;
+        panel.style.color = colors.text;
+        panel.style.transition = 'background-color 0.3s, color 0.3s';
+        panel.style.webkitBackdropFilter = 'blur(5px)'; // Safari 支持
+        panel.style.backdropFilter = 'blur(5px)';
+
+        // 更新结果区域样式
+        resultArea.style.backgroundColor = colors.inputBg;
+        resultArea.style.color = colors.text;
+        resultArea.style.border = `1px solid ${colors.border}`;
+        resultArea.style.transition = 'background-color 0.3s, color 0.3s, border-color 0.3s';
+
+        // 更新所有输入框样式
+        const inputs = panel.querySelectorAll('input');
+        inputs.forEach(input => {
+            input.style.backgroundColor = colors.inputBg;
+            input.style.color = colors.text;
+            input.style.border = `1px solid ${colors.border}`;
+            input.style.transition = 'background-color 0.3s, color 0.3s, border-color 0.3s';
+            
+            // 添加焦点样式
+            input.addEventListener('focus', () => {
+                input.style.boxShadow = CONFIG.DARK_MODE ? 
+                    '0 0 0 2px rgba(102, 179, 255, 0.25)' : 
+                    '0 0 0 2px rgba(0, 123, 255, 0.25)';
+            });
+            input.addEventListener('blur', () => {
+                input.style.boxShadow = 'none';
+            });
+        });
+
+        // 更新按钮样式
+        const buttons = panel.querySelectorAll('button');
+        buttons.forEach(button => {
+            if (button !== darkModeButton) {
+                button.style.transition = 'background-color 0.3s';
+                
+                // 添加悬停效果
+                button.addEventListener('mouseover', () => {
+                    const currentBg = button.style.backgroundColor;
+                    button.style.backgroundColor = colors.buttonHover;
+                });
+                button.addEventListener('mouseout', () => {
+                    button.style.backgroundColor = button.dataset.originalBg || '';
+                });
+                
+                // 存储原始背景色
+                button.dataset.originalBg = button.style.backgroundColor;
+            }
+        });
+
+        // 其他样式更新保持不变...
+        const links = panel.querySelectorAll('a');
+        links.forEach(link => {
+            link.style.color = colors.link;
+            link.style.transition = 'color 0.3s';
+        });
+
+        const titles = panel.querySelectorAll('h3');
+        titles.forEach(title => {
+            title.style.color = colors.text;
+            title.style.transition = 'color 0.3s';
+        });
+
+        const labels = form.querySelectorAll('label');
+        labels.forEach(label => {
+            label.style.color = colors.text;
+            label.style.transition = 'color 0.3s';
+        });
+
+        footer.style.color = colors.text;
+        footer.style.transition = 'color 0.3s';
+
+        // 更新暗色模式按钮
+        darkModeButton.textContent = CONFIG.DARK_MODE ? '切换亮色模式' : '切换暗色模式';
+        darkModeButton.style.backgroundColor = CONFIG.DARK_MODE ? '#404040' : '#6C757D';
+    }
+})();
