@@ -11,7 +11,7 @@ import WebKit
 struct ContentView: View {
     var body: some View {
         GeometryReader { geometry in
-            WebView(url: URL(string: "https://music.ydev.tech")!)
+            WebView(url: URL(string: "https://musch")!)
                 .frame(width: geometry.size.width, height: geometry.size.height * 6)
                 .edgesIgnoringSafeArea(.all)
         }
