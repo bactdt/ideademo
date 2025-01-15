@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23605" systemVersion="23F79" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+    <entity name="TranscriptionRecordEntity" representedClassName="TranscriptionRecordEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="keywords" optional="YES" attributeType="Transformable"/>
+        <attribute name="originalText" optional="YES" attributeType="String"/>
+        <attribute name="processedText" optional="YES" attributeType="String"/>
+        <attribute name="spaceKeywords" optional="YES" attributeType="Transformable"/>
+        <attribute name="tags" optional="YES" attributeType="Transformable"/>
+        <attribute name="timeKeywords" optional="YES" attributeType="Transformable"/>
+        <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+    </entity>
+</model>
