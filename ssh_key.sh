@@ -414,18 +414,32 @@ apply_sshd_config() {
     warn "未检测到 dconf Include，将合并修改主配置：$target"
     backup_file "$target"
 
-    # 使用 sed 注释掉已有的相关配置行，然后追加新配置
+    # 使用 awk 只注释全局配置，保留 Match 块内的配置不变
     local tmp
     tmp="$(mktemp)"
+    [[ -n "$tmp" ]] || die "创建临时文件失败"
 
-    # 注释掉可能冲突的配置项（保留原内容可追溯）
-    sed -E \
-      -e 's/^[[:space:]]*(Port[[:space:]]+)/#DISABLED_BY_ssh_key.sh# \1/' \
-      -e 's/^[[:space:]]*(PubkeyAuthentication[[:space:]]+)/#DISABLED_BY_ssh_key.sh# \1/' \
-      -e 's/^[[:space:]]*(PasswordAuthentication[[:space:]]+)/#DISABLED_BY_ssh_key.sh# \1/' \
-      "$target" > "$tmp"
+    # awk 逻辑：跟踪 Match 块，只在全局作用域注释相关配置
+    awk '
+      BEGIN { in_match = 0 }
+      # 检测 Match 块开始（行首 Match，不区分大小写）
+      /^[[:space:]]*[Mm]atch[[:space:]]/ { in_match = 1; print; next }
+      # 检测 Match 块结束：遇到行首非空白字符的配置（非注释）
+      in_match && /^[^[:space:]#]/ { in_match = 0 }
+      # 全局作用域：注释掉冲突配置
+      !in_match && /^[[:space:]]*Port[[:space:]]+/ {
+        print "#DISABLED_BY_ssh_key.sh# " $0; next
+      }
+      !in_match && /^[[:space:]]*PubkeyAuthentication[[:space:]]+/i {
+        print "#DISABLED_BY_ssh_key.sh# " $0; next
+      }
+      !in_match && /^[[:space:]]*PasswordAuthentication[[:space:]]+/i {
+        print "#DISABLED_BY_ssh_key.sh# " $0; next
+      }
+      { print }
+    ' "$target" > "$tmp"
 
-    # 追加托管配置块
+    # 追加托管配置块（放在文件末尾，Match 块之前生效）
     {
       echo ""
       echo "# ========== BEGIN MANAGED BY ssh_key.sh =========="
@@ -437,7 +451,7 @@ apply_sshd_config() {
 
     mv "$tmp" "$target"
     chmod 0600 "$target"
-    log "✅ 已合并配置到主文件（原有安全设置已保留）"
+    log "✅ 已合并配置（Match 块内的细粒度策略已保留）"
   fi
 
   # 如果改端口：先放行防火墙 + SELinux（降低锁死风险）
@@ -503,6 +517,20 @@ select_target_user() {
 }
 
 # ---------- fail2ban：安装与配置 ----------
+
+# 修复 CentOS 8 EOL 仓库问题
+fix_centos8_repos() {
+  # 检测是否为 CentOS 8
+  if [[ -f /etc/centos-release ]] && grep -q "CentOS.*8" /etc/centos-release 2>/dev/null; then
+    if grep -q "mirrorlist" /etc/yum.repos.d/CentOS-*.repo 2>/dev/null; then
+      warn "检测到 CentOS 8 (EOL)，正在切换到 vault 仓库..."
+      sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true
+      sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true
+      log "✅ 已切换到 vault.centos.org"
+    fi
+  fi
+}
+
 install_fail2ban() {
   require_root
   if command -v fail2ban-client >/dev/null 2>&1; then
@@ -510,23 +538,61 @@ install_fail2ban() {
     return 0
   fi
 
+  log "正在安装 fail2ban..."
+
   if command -v apt >/dev/null 2>&1; then
-    apt update
-    apt install -y fail2ban
+    # Debian/Ubuntu
+    apt update || warn "apt update 失败，继续尝试安装"
+    apt install -y fail2ban || { warn "fail2ban 安装失败"; return 1; }
+
   elif command -v dnf >/dev/null 2>&1; then
-    dnf -y install fail2ban
+    # RHEL 8+/CentOS 8+/Fedora
+    fix_centos8_repos
+
+    # 安装 EPEL（fail2ban 在 EPEL 仓库）
+    if ! rpm -q epel-release >/dev/null 2>&1; then
+      log "安装 EPEL 仓库..."
+      dnf -y install epel-release || warn "EPEL 安装失败"
+    fi
+
+    # 安装依赖
+    log "安装依赖包..."
+    dnf -y install nftables python3-systemd 2>/dev/null || warn "部分依赖安装失败"
+
+    # 安装 fail2ban
+    dnf -y install fail2ban || { warn "fail2ban 安装失败"; return 1; }
+
   elif command -v yum >/dev/null 2>&1; then
-    yum -y install fail2ban
+    # RHEL 7/CentOS 7
+    if ! rpm -q epel-release >/dev/null 2>&1; then
+      log "安装 EPEL 仓库..."
+      yum -y install epel-release || warn "EPEL 安装失败"
+    fi
+    yum -y install fail2ban || { warn "fail2ban 安装失败"; return 1; }
+
   else
-    die "无法识别包管理器（apt/dnf/yum），请手动安装 fail2ban"
+    warn "无法识别包管理器，请手动安装 fail2ban"
+    return 1
   fi
 
-  log "✅ fail2ban 安装完成"
+  # 验证安装
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    log "✅ fail2ban 安装完成"
+    return 0
+  else
+    warn "fail2ban 安装后未找到命令，请检查"
+    return 1
+  fi
 }
 
 configure_fail2ban() {
   require_root
-  install_fail2ban
+
+  # 安装 fail2ban（失败时不退出，仅警告）
+  if ! install_fail2ban; then
+    warn "fail2ban 安装失败，跳过配置"
+    return 1
+  fi
 
   # 端口：优先用你设置的 SSH_PORT；否则用系统当前生效端口；再否则 22
   local port_to_use=""
@@ -537,7 +603,11 @@ configure_fail2ban() {
     port_to_use="${OLD_SSH_PORT:-22}"
   fi
 
+  # 备份现有配置
   mkdir -p "$(dirname "$F2B_JAIL")"
+  [[ -f "$F2B_JAIL" ]] && backup_file "$F2B_JAIL"
+
+  # 写入新配置
   cat >"$F2B_JAIL" <<EOF
 [sshd]
 enabled = true
@@ -549,10 +619,13 @@ bantime = 1h
 action = %(action_mwl)s
 EOF
 
-  systemctl enable fail2ban --now
-  systemctl restart fail2ban
-
-  log "✅ fail2ban 已配置：sshd jail 端口=${port_to_use}（文件：$F2B_JAIL）"
+  # 启动服务（带错误处理）
+  if systemctl enable fail2ban --now 2>/dev/null; then
+    systemctl restart fail2ban 2>/dev/null || warn "fail2ban 重启失败"
+    log "✅ fail2ban 已配置：端口=${port_to_use}"
+  else
+    warn "fail2ban 服务启动失败，请手动检查"
+  fi
 }
 
 show_fail2ban_status() {
