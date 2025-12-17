@@ -555,12 +555,36 @@ install_fail2ban() {
       dnf -y install epel-release || warn "EPEL 安装失败"
     fi
 
-    # 安装依赖
+    # 安装依赖（使用 --allowerasing 解决包冲突）
     log "安装依赖包..."
-    dnf -y install nftables python3-systemd 2>/dev/null || warn "部分依赖安装失败"
+    if ! dnf -y install nftables python3-systemd 2>/dev/null; then
+      warn "常规安装失败，尝试 --allowerasing 解决冲突..."
+      dnf -y --allowerasing install nftables python3-systemd 2>/dev/null || {
+        warn "依赖安装失败，检测包冲突..."
+        # 显示冲突的 el7 包
+        local el7_pkgs
+        el7_pkgs="$(rpm -qa | grep -E '\.el7' | head -5)"
+        if [[ -n "$el7_pkgs" ]]; then
+          echo "─────────────────────────────────────"
+          warn "检测到 CentOS 7 遗留包（可能是升级残留）："
+          echo "$el7_pkgs"
+          echo "..."
+          echo "建议手动清理: dnf remove systemd-python"
+          echo "或强制: dnf -y --allowerasing install fail2ban"
+          echo "─────────────────────────────────────"
+        fi
+      }
+    fi
 
-    # 安装 fail2ban
-    dnf -y install fail2ban || { warn "fail2ban 安装失败"; return 1; }
+    # 安装 fail2ban（使用 --allowerasing）
+    if ! dnf -y install fail2ban 2>/dev/null; then
+      log "尝试 --allowerasing 安装 fail2ban..."
+      dnf -y --allowerasing install fail2ban || {
+        warn "fail2ban 安装失败"
+        warn "可尝试: dnf remove systemd-python && dnf install fail2ban"
+        return 1
+      }
+    fi
 
   elif command -v yum >/dev/null 2>&1; then
     # RHEL 7/CentOS 7
