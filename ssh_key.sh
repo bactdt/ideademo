@@ -150,21 +150,28 @@ detect_sshd_service_name() {
 }
 
 reload_sshd() {
-  need_cmd sshd
-  sshd -t || die "sshd 配置语法校验失败（sshd -t 未通过）"
-
+  # 优先 systemd
   if command -v systemctl >/dev/null 2>&1; then
-    local svc
-    svc="$(detect_sshd_service_name)"
-    if [[ -n "$svc" ]]; then
-      systemctl reload "$svc" || systemctl restart "$svc"
-      return 0
+    if systemctl list-unit-files | grep -q '^sshd\.service'; then
+      log "🔄 使用 systemctl reload sshd"
+      systemctl reload sshd && return
+    fi
+    if systemctl list-unit-files | grep -q '^ssh\.service'; then
+      log "🔄 使用 systemctl reload ssh"
+      systemctl reload ssh && return
     fi
   fi
 
-  warn "未识别 systemd 服务名，兜底使用 pkill -HUP sshd 重载"
-  pkill -HUP sshd || die "pkill -HUP sshd 失败，请手动重载"
+  # 兜底：给 sshd 发送 HUP
+  if pgrep sshd >/dev/null 2>&1; then
+    log "⚠️ systemd 未匹配，兜底使用 SIGHUP 重载 sshd"
+    pkill -HUP sshd
+    return
+  fi
+
+  die "❌ 无法找到运行中的 sshd，未能重载配置"
 }
+
 
 # ---------- 托管式密钥管理 ----------
 sync_authorized_keys_managed_block() {
