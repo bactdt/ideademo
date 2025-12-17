@@ -255,6 +255,7 @@ EOF
 main_loop() {
   refresh_paths
   while true; do
+    clear || true
     menu
     read -r -p "请选择: " choice
     case "${choice:-}" in
@@ -265,15 +266,17 @@ main_loop() {
       5) sync_authorized_keys_force_overwrite ;;
       6) show_authorized_keys ;;
       7) toggle_disable_password ;;
-      8) configure_sshd ;;
-      9) backup_sshd_config ;;
-      10) restore_sshd_config ;;
+      8) apply_sshd_config ;;
+      9) restore_last_backup ;;
       0) log "Bye."; exit 0 ;;
       *) warn "无效选项：$choice" ;;
     esac
+
     echo
+    read -r -p "回车继续..." _
   done
 }
+
 
 # 启动
 main_loop
