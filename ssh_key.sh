@@ -138,39 +138,43 @@ restore_last_backup() {
 }
 
 detect_sshd_service_name() {
-  if systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx 'sshd.service'; then
-    echo "sshd"
-  elif systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx 'ssh.service'; then
+  # 先优先用真正 enabled 的 ssh.service（在很多 Debian/Ubuntu 上就是它）
+  if systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1,$2}' | grep -q '^ssh\.service[[:space:]]\+enabled'; then
     echo "ssh"
-  elif systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx 'openssh-server.service'; then
-    echo "openssh-server"
-  else
-    echo ""
-  fi
-}
-
-reload_sshd() {
-  # 优先 systemd
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl list-unit-files | grep -q '^sshd\.service'; then
-      log "🔄 使用 systemctl reload sshd"
-      systemctl reload sshd && return
-    fi
-    if systemctl list-unit-files | grep -q '^ssh\.service'; then
-      log "🔄 使用 systemctl reload ssh"
-      systemctl reload ssh && return
-    fi
-  fi
-
-  # 兜底：给 sshd 发送 HUP
-  if pgrep sshd >/dev/null 2>&1; then
-    log "⚠️ systemd 未匹配，兜底使用 SIGHUP 重载 sshd"
-    pkill -HUP sshd
     return
   fi
 
-  die "❌ 无法找到运行中的 sshd，未能重载配置"
+  # 再尝试 sshd.service（有些系统是它）
+  if systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1,$2}' | grep -q '^sshd\.service[[:space:]]\+enabled'; then
+    echo "sshd"
+    return
+  fi
+
+  # 如果 sshd 是 alias，也可以直接使用 ssh（更稳）
+  if systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1,$2}' | grep -q '^sshd\.service[[:space:]]\+alias'; then
+    echo "ssh"
+    return
+  fi
+
+  echo ""
 }
+
+
+reload_sshd() {
+  sshd -t || die "sshd 配置校验失败"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    local svc
+    svc="$(detect_sshd_service_name)"
+    if [[ -n "$svc" ]]; then
+      systemctl reload "$svc" || systemctl restart "$svc"
+      return 0
+    fi
+  fi
+
+  pkill -HUP sshd || die "无法重载 sshd"
+}
+
 
 
 # ---------- 托管式密钥管理 ----------
