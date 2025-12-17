@@ -1,19 +1,33 @@
 #!/usr/bin/env bash
+# =============================================================================
+# 脚本名称: ssh_key.sh
+# 描    述: SSH 密钥管理工具 - 托管密钥同步、SSHD 配置、防火墙、fail2ban
+# 版    本: v1.0
+# =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
 umask 077
 
 # =========================================================
-# 固定公钥定义区（唯一需要日后维护的地方）
+# 固定公钥定义区（你只需要维护这里）
 # 一行一个 key，不要换行
 SSH_KEYS=(
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB525kOyxHEeE8DV5BXfIC9kRR3NUSEQ2yBpsw/IPo8I newnew@mydevice"
-  # "ssh-ed25519 AAAA... backup@laptop"
 )
 
-# 是否允许“强制覆盖” authorized_keys（危险：会删除不在 SSH_KEYS 中的旧 key）
-# 0 = 默认安全模式（只加不减）  1 = 允许菜单里选择覆盖
+# 是否允许“覆盖式写入”（危险：会删除非托管 key；默认关闭）
 ALLOW_FORCE_OVERWRITE=0
+
+# 托管区块标记（脚本只会改这里的内容）
+MANAGED_BEGIN="# ==== BEGIN MANAGED BY ssh_key.sh ===="
+MANAGED_END="# ==== END MANAGED BY ssh_key.sh ===="
+
+# fail2ban jail 文件
+F2B_JAIL="/etc/fail2ban/jail.d/sshd.local"
+
+# 备份保留数量（超过此数量的旧备份将被清理）
+BACKUP_KEEP_COUNT=5
+
 # =========================================================
 
 log()  { echo -e "$*"; }
@@ -21,20 +35,20 @@ warn() { echo -e "⚠️ $*"; }
 die()  { echo -e "❌ $*" >&2; exit 1; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"; }
+require_root() { [[ "$(id -u)" -eq 0 ]] || die "需要 root 权限（请用 sudo 运行）"; }
 
-# ---------- 状态 ----------
+# ---------- 运行状态 ----------
 TARGET_USER="${SUDO_USER:-$(id -un)}"
 DISABLE_PASSWORD=0
-SSHD_CONFIG="/etc/ssh/sshd_config"
+SSH_PORT=""         # 为空表示不改端口（保持现状）
+OLD_SSH_PORT=""     # 读取系统当前生效端口，用于提示/关闭旧端口
+SSHD_MAIN="/etc/ssh/sshd_config"
+SSHD_DCONF="/etc/ssh/sshd_config.d/99-keys.conf"
 LAST_BACKUP=""
+LAST_BACKUP_TARGET=""
 
-get_home_of_user() {
-  local u="$1"
-  local pwline
-  pwline="$(getent passwd "$u" || true)"
-  [[ -n "$pwline" ]] || return 1
-  awk -F: '{print $6}' <<<"$pwline"
-}
+# ---------- 基础 ----------
+get_home_of_user() { getent passwd "$1" | awk -F: '{print $6}'; }
 
 refresh_paths() {
   TARGET_HOME="$(get_home_of_user "$TARGET_USER" || true)"
@@ -44,7 +58,6 @@ refresh_paths() {
 }
 
 as_target_user() {
-  # root 且目标用户不是当前用户时才需要 sudo -u
   if [[ "$(id -u)" -eq 0 && "$(id -un)" != "$TARGET_USER" ]]; then
     need_cmd sudo
     sudo -u "$TARGET_USER" "$@"
@@ -53,14 +66,17 @@ as_target_user() {
   fi
 }
 
-require_root() {
-  [[ "$(id -u)" -eq 0 ]] || die "此操作需要 root，请用 sudo 运行脚本"
-}
-
 validate_pubkey_line() {
   local k="$1"
+  # 检查是否包含换行/回车/制表符
   [[ "$k" != *$'\n'* && "$k" != *$'\r'* && "$k" != *$'\t'* ]] || return 1
-  [[ "$k" =~ ^ssh-(ed25519|rsa|ecdsa)[[:space:]]+[A-Za-z0-9+/]{50,}={0,3}([[:space:]].*)?$ ]]
+  # 支持的密钥类型：ed25519, rsa, dss, ecdsa-sha2-nistp*, sk-ssh-ed25519, sk-ecdsa-sha2-nistp256
+  [[ "$k" =~ ^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)[[:space:]]+[A-Za-z0-9+/]{50,}={0,3}([[:space:]].*)?$ ]]
+}
+
+validate_port() {
+  local p="${1:-}"
+  [[ "$p" =~ ^[0-9]+$ ]] && (( 1 <= 10#$p && 10#$p <= 65535 ))
 }
 
 setup_ssh_directory() {
@@ -69,52 +85,133 @@ setup_ssh_directory() {
   chmod 0700 "$SSH_DIR"
   touch "$KEY_FILE"
   chmod 0600 "$KEY_FILE"
-  # 不递归 chown，避免误伤
   chown "$TARGET_USER:$TARGET_USER" "$SSH_DIR" "$KEY_FILE" 2>/dev/null || true
 }
 
-sync_authorized_keys_append_only() {
-  refresh_paths
-  setup_ssh_directory
-
-  local added=0
-  local exists=0
-
-  for key in "${SSH_KEYS[@]}"; do
-    validate_pubkey_line "$key" || die "公钥格式错误：${key:0:80}..."
-
-    if as_target_user grep -qxF -- "$key" "$KEY_FILE"; then
-      exists=$((exists+1))
-    else
-      printf '%s\n' "$key" | as_target_user tee -a "$KEY_FILE" >/dev/null
-      added=$((added+1))
-    fi
-  done
-
-  log "✅ 公钥同步完成（只加不减）：新增 $added 条，已存在 $exists 条"
+detect_uses_dconf() {
+  [[ -f "$SSHD_MAIN" ]] || return 1
+  grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:space:]]|$)' "$SSHD_MAIN"
 }
 
-sync_authorized_keys_force_overwrite() {
-  [[ "$ALLOW_FORCE_OVERWRITE" -eq 1 ]] || die "已禁用覆盖模式（ALLOW_FORCE_OVERWRITE=0）"
+choose_sshd_target() {
+  if detect_uses_dconf; then
+    echo "$SSHD_DCONF"
+  else
+    echo "$SSHD_MAIN"
+  fi
+}
+
+backup_file() {
+  local f="$1"
+  [[ -e "$f" ]] || return 0
+  local b="${f}.bak.$(date +%F_%H%M%S)"
+  cp -a "$f" "$b"
+  LAST_BACKUP="$b"
+  LAST_BACKUP_TARGET="$f"
+  log "✅ 已备份：$b"
+  # 清理旧备份
+  cleanup_old_backups "$f"
+}
+
+# 清理旧备份，保留最近 BACKUP_KEEP_COUNT 个
+cleanup_old_backups() {
+  local f="$1"
+  local pattern="${f}.bak.*"
+  local count
+  count="$(find "$(dirname "$f")" -maxdepth 1 -name "$(basename "$f").bak.*" -type f 2>/dev/null | wc -l)"
+  if (( count > BACKUP_KEEP_COUNT )); then
+    local to_delete
+    to_delete="$(find "$(dirname "$f")" -maxdepth 1 -name "$(basename "$f").bak.*" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | head -n "$((count - BACKUP_KEEP_COUNT))" | cut -d' ' -f2-)"
+    if [[ -n "$to_delete" ]]; then
+      echo "$to_delete" | while IFS= read -r old_bak; do
+        rm -f "$old_bak" && log "🗑️ 已清理旧备份：$old_bak"
+      done
+    fi
+  fi
+}
+
+restore_last_backup() {
+  require_root
+  [[ -n "$LAST_BACKUP" && -n "$LAST_BACKUP_TARGET" ]] || die "没有记录到备份（仅本次运行内创建的备份可回滚）"
+  [[ -f "$LAST_BACKUP" ]] || die "备份不存在：$LAST_BACKUP"
+  cp -a "$LAST_BACKUP" "$LAST_BACKUP_TARGET"
+  log "✅ 已回滚：$LAST_BACKUP_TARGET  ←  $LAST_BACKUP"
+
+  # 如果回滚的是 sshd 配置文件，自动重载 sshd
+  if [[ "$LAST_BACKUP_TARGET" == "$SSHD_MAIN" || "$LAST_BACKUP_TARGET" == "$SSHD_DCONF" ]]; then
+    log "ℹ️ 检测到回滚的是 sshd 配置，正在重载 sshd..."
+    if sshd -t 2>/dev/null; then
+      reload_sshd
+      log "✅ sshd 已重载"
+    else
+      warn "sshd 配置校验失败（sshd -t），请手动检查并重载"
+    fi
+  fi
+}
+
+detect_sshd_service_name() {
+  if systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx 'sshd.service'; then
+    echo "sshd"
+  elif systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx 'ssh.service'; then
+    echo "ssh"
+  elif systemctl list-unit-files --no-pager 2>/dev/null | awk '{print $1}' | grep -qx 'openssh-server.service'; then
+    echo "openssh-server"
+  else
+    echo ""
+  fi
+}
+
+reload_sshd() {
+  need_cmd sshd
+  sshd -t || die "sshd 配置语法校验失败（sshd -t 未通过）"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    local svc
+    svc="$(detect_sshd_service_name)"
+    if [[ -n "$svc" ]]; then
+      systemctl reload "$svc" || systemctl restart "$svc"
+      return 0
+    fi
+  fi
+
+  warn "未识别 systemd 服务名，兜底使用 pkill -HUP sshd 重载"
+  pkill -HUP sshd || die "pkill -HUP sshd 失败，请手动重载"
+}
+
+# ---------- 托管式密钥管理 ----------
+sync_authorized_keys_managed_block() {
   refresh_paths
   setup_ssh_directory
 
-  # 备份
-  local bak="$KEY_FILE.bak.$(date +%F_%H%M%S)"
-  as_target_user cp -a "$KEY_FILE" "$bak"
-  log "✅ 已备份 authorized_keys：$bak"
+  # 先移除旧托管区块（保留其它内容）
+  # 在目标目录创建临时文件，避免跨文件系统移动和权限问题
+  local tmp
+  tmp="$(mktemp "$SSH_DIR/tmp.XXXXXX")"
+  # 确保临时文件有正确权限
+  chmod 0600 "$tmp"
 
-  # 覆盖写入
-  as_target_user : > "$KEY_FILE"
-  local written=0
-  for key in "${SSH_KEYS[@]}"; do
-    validate_pubkey_line "$key" || die "公钥格式错误：${key:0:80}..."
-    printf '%s\n' "$key" | as_target_user tee -a "$KEY_FILE" >/dev/null
-    written=$((written+1))
-  done
+  awk -v b="$MANAGED_BEGIN" -v e="$MANAGED_END" '
+    $0==b {in_block=1; next}
+    $0==e {in_block=0; next}
+    !in_block {print}
+  ' "$KEY_FILE" > "$tmp" 2>/dev/null || true
 
+  # 追加新的托管区块
+  {
+    echo "$MANAGED_BEGIN"
+    for k in "${SSH_KEYS[@]}"; do
+      validate_pubkey_line "$k" || die "公钥格式错误：${k:0:80}..."
+      echo "$k"
+    done
+    echo "$MANAGED_END"
+  } >> "$tmp"
+
+  # 备份并替换（使用 root 权限操作，最后再修正所有权）
+  cp -a "$KEY_FILE" "$KEY_FILE.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
+  mv "$tmp" "$KEY_FILE"
   chmod 0600 "$KEY_FILE"
-  log "✅ 公钥同步完成（覆盖模式）：写入 $written 条（其余旧 key 已移除）"
+  chown "$TARGET_USER:$TARGET_USER" "$KEY_FILE" 2>/dev/null || true
+  log "✅ 已同步托管密钥区块（可通过修改脚本 SSH_KEYS 来新增/撤销托管 key；非托管 key 不受影响）"
 }
 
 show_authorized_keys() {
@@ -125,78 +222,252 @@ show_authorized_keys() {
   echo "---------------------"
 }
 
-backup_sshd_config() {
-  require_root
-  [[ -w "$SSHD_CONFIG" ]] || die "无法写入：$SSHD_CONFIG"
-  local bak="${SSHD_CONFIG}.bak.$(date +%F_%H%M%S)"
-  cp -a "$SSHD_CONFIG" "$bak"
-  LAST_BACKUP="$bak"
-  log "✅ 已备份：$bak"
+# ---------- 防火墙：增/删端口 ----------
+open_port_ufw() { ufw allow "${1}/tcp" >/dev/null; log "✅ UFW 已放行：${1}/tcp"; }
+close_port_ufw() { ufw delete allow "${1}/tcp" >/dev/null || true; log "✅ UFW 已删除：${1}/tcp"; }
+
+open_port_firewalld() {
+  firewall-cmd --permanent --add-port="${1}/tcp" >/dev/null
+  firewall-cmd --reload >/dev/null
+  log "✅ firewalld 已放行（permanent）：${1}/tcp"
+}
+close_port_firewalld() {
+  firewall-cmd --permanent --remove-port="${1}/tcp" >/dev/null || true
+  firewall-cmd --reload >/dev/null
+  log "✅ firewalld 已删除（permanent）：${1}/tcp"
 }
 
-restore_sshd_config() {
-  require_root
-  [[ -n "$LAST_BACKUP" ]] || die "没有记录到备份文件（本次运行内）。"
-  [[ -f "$LAST_BACKUP" ]] || die "备份文件不存在：$LAST_BACKUP"
-  cp -a "$LAST_BACKUP" "$SSHD_CONFIG"
-  log "✅ 已回滚到：$LAST_BACKUP"
+open_port_iptables() {
+  local p="$1"
+  if iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null; then
+    log "✅ iptables 已存在放行规则：${p}/tcp"
+  else
+    iptables -I INPUT -p tcp --dport "$p" -j ACCEPT
+    log "✅ iptables 已放行：${p}/tcp（可能不持久）"
+  fi
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null || true
+    log "ℹ️ 已尝试 netfilter-persistent 保存规则"
+  else
+    warn "iptables 规则可能在重启后丢失（未检测到 netfilter-persistent）"
+  fi
+}
+close_port_iptables() {
+  local p="$1"
+  iptables -D INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || true
+  log "⚠️ iptables 已尝试删除：${p}/tcp（请确认是否持久化）"
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null || true
+    log "ℹ️ 已尝试 netfilter-persistent 保存规则"
+  fi
 }
 
-configure_sshd() {
+open_port_firewall() {
   require_root
-  need_cmd awk
+  local p="$1"
+  validate_port "$p" || die "非法端口：$p"
+
+  if command -v ufw >/dev/null 2>&1; then
+    open_port_ufw "$p"; return 0
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    open_port_firewalld "$p"; return 0
+  fi
+  if command -v iptables >/dev/null 2>&1; then
+    open_port_iptables "$p"; return 0
+  fi
+  warn "未检测到 ufw/firewalld/iptables，无法自动放行 ${p}/tcp"
+}
+
+close_port_firewall() {
+  require_root
+  local p="$1"
+  validate_port "$p" || die "非法端口：$p"
+
+  if command -v ufw >/dev/null 2>&1; then
+    close_port_ufw "$p"; return 0
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    close_port_firewalld "$p"; return 0
+  fi
+  if command -v iptables >/dev/null 2>&1; then
+    close_port_iptables "$p"; return 0
+  fi
+  warn "未检测到 ufw/firewalld/iptables，无法自动删除 ${p}/tcp"
+}
+
+show_firewall_rules() {
+  require_root
+  echo
+  echo "====== 防火墙规则（自动识别）======"
+  if command -v ufw >/dev/null 2>&1; then
+    ufw status verbose || true
+  elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --get-active-zones || true
+    firewall-cmd --list-all || true
+  elif command -v iptables >/dev/null 2>&1; then
+    iptables -L INPUT -n --line-numbers || true
+  else
+    echo "未检测到 ufw/firewalld/iptables"
+  fi
+  echo "==================================="
+  echo
+}
+
+# ---------- SELinux：允许 sshd 绑定新端口 ----------
+selinux_is_enforcing() {
+  command -v getenforce >/dev/null 2>&1 || return 1
+  [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]]
+}
+
+ensure_selinux_ssh_port() {
+  local p="$1"
+  validate_port "$p" || die "非法端口：$p"
+  selinux_is_enforcing || return 0
+
+  if ! command -v semanage >/dev/null 2>&1; then
+    warn "SELinux 为 Enforcing，但没有 semanage；将尝试安装 policycoreutils-python-utils"
+    if command -v dnf >/dev/null 2>&1; then
+      dnf -y install policycoreutils-python-utils >/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then
+      yum -y install policycoreutils-python-utils >/dev/null || true
+    elif command -v apt >/dev/null 2>&1; then
+      apt update >/dev/null || true
+      apt install -y policycoreutils-python-utils >/dev/null || true
+    fi
+  fi
+
+  command -v semanage >/dev/null 2>&1 || die "SELinux Enforcing 且缺少 semanage，无法自动放行 ssh 端口（请安装 policycoreutils-python-utils）"
+
+  # 已存在则跳过；不存在就 add；如果存在但类型不对则 modify
+  if semanage port -l 2>/dev/null | awk '$1=="ssh_port_t"{print $4}' | grep -qw "$p"; then
+    log "✅ SELinux：端口 $p 已在 ssh_port_t 中"
+    return 0
+  fi
+
+  semanage port -a -t ssh_port_t -p tcp "$p" 2>/dev/null || semanage port -m -t ssh_port_t -p tcp "$p"
+  log "✅ SELinux：已允许 sshd 使用端口 $p（ssh_port_t）"
+}
+
+# ---------- SSHD：生效配置查看 ----------
+show_effective_sshd_config() {
+  require_root
+  need_cmd sshd
+  echo
+  echo "====== SSHD 最终生效配置（sshd -T）======"
+  sshd -T | grep -Ei \
+'^(port|listenaddress|pubkeyauthentication|passwordauthentication|permitrootlogin|allowusers|denyusers|clientaliveinterval|clientalivecountmax)[[:space:]]'
+  echo "========================================="
+  echo
+}
+
+# ---------- 防锁死自检 ----------
+preflight_lockout_check() {
+  require_root
   need_cmd sshd
 
-  backup_sshd_config
-
-  if grep -Eq '^[[:space:]]*Include[[:space:]]+' "$SSHD_CONFIG"; then
-    warn "检测到 Include：sshd_config.d 可能覆盖主配置，请留意。"
+  # 1) 托管 key 不能为空
+  if [[ "${#SSH_KEYS[@]}" -lt 1 ]]; then
+    die "SSH_KEYS 为空：禁止执行（否则可能锁死）"
   fi
 
-  local tmp
-  tmp="$(mktemp)"
-  awk -v disable_pw="$DISABLE_PASSWORD" '
-    BEGIN { done_pk=0; done_pa=0; inserted=0; }
-    function emit_defaults() {
-      if (!done_pk) { print "PubkeyAuthentication yes"; done_pk=1; }
-      if (disable_pw==1 && !done_pa) { print "PasswordAuthentication no"; done_pa=1; }
-      inserted=1;
-    }
-    {
-      if ($0 ~ /^[[:space:]]*Match[[:space:]]/ && !inserted) emit_defaults()
-
-      if ($0 ~ /^[[:space:]]*#?[[:space:]]*PubkeyAuthentication[[:space:]]+/) { done_pk=1; next; }
-      if (disable_pw==1 && $0 ~ /^[[:space:]]*#?[[:space:]]*PasswordAuthentication[[:space:]]+/) { done_pa=1; next; }
-
-      print $0
-    }
-    END { if (!inserted) emit_defaults() }
-  ' "$SSHD_CONFIG" > "$tmp"
-
-  cat "$tmp" > "$SSHD_CONFIG"
-  rm -f "$tmp"
-
-  sshd -t -f "$SSHD_CONFIG" || die "sshd_config 校验失败（已备份：$LAST_BACKUP）"
-
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl list-unit-files | grep -q '^sshd\.service'; then
-      systemctl reload sshd || systemctl restart sshd
-    elif systemctl list-unit-files | grep -q '^ssh\.service'; then
-      systemctl reload ssh || systemctl restart ssh
-    else
-      die "systemd 下找不到 ssh/sshd 服务名，请手动重载"
-    fi
-  elif command -v service >/dev/null 2>&1; then
-    service ssh reload || service ssh restart || service sshd restart || true
-  else
-    die "找不到服务管理命令，请手动重载 SSH"
-  fi
-
+  # 2) 如果要禁用密码，必须确保 authorized_keys 存在且非空（至少有托管块）
+  refresh_paths
+  setup_ssh_directory
   if [[ "$DISABLE_PASSWORD" -eq 1 ]]; then
-    log "✅ 已启用公钥登录并禁用密码登录（务必另开终端验证密钥可用后再断开当前连接）"
-  else
-    log "✅ 已确保启用公钥登录（未禁用密码登录）"
+    if ! [[ -s "$KEY_FILE" ]]; then
+      die "你选择禁用密码登录，但 authorized_keys 为空：禁止执行（锁死风险）"
+    fi
   fi
+
+  # 3) 端口校验
+  if [[ -n "$SSH_PORT" ]]; then
+    validate_port "$SSH_PORT" || die "拟设置的 SSH_PORT 非法：$SSH_PORT"
+  fi
+
+  # 4) 如果 SELinux Enforcing 且要改端口，必须确保能放行（否则你之前的 Permission denied 会重现）
+  if [[ -n "$SSH_PORT" ]] && selinux_is_enforcing; then
+    # 不在这里修改，只检查工具是否具备
+    if ! command -v semanage >/dev/null 2>&1; then
+      warn "SELinux=Enforcing 且你要改端口，但当前无 semanage；应用时会尝试安装。"
+    fi
+  fi
+
+  # 5) sshd 语法预检（在写入后还会再检）
+  sshd -t || die "当前 sshd 配置本身就不通过（sshd -t 失败），先修复再操作"
+
+  log "✅ 防锁死自检通过"
+}
+
+# ---------- 应用 SSHD 配置 ----------
+apply_sshd_config() {
+  preflight_lockout_check
+
+  local target
+  target="$(choose_sshd_target)"
+  if [[ "$target" == "$SSHD_DCONF" ]]; then
+    mkdir -p "$(dirname "$target")"
+    log "ℹ️ 使用 dconf 模式写入：$target"
+  else
+    warn "未检测到 dconf Include，将直接修改主配置：$target"
+  fi
+
+  # 保存原文件权限（如果存在）
+  local orig_perms="0644"
+  if [[ -f "$target" ]]; then
+    orig_perms="$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target" 2>/dev/null || echo '0644')"
+  fi
+
+  backup_file "$target"
+
+  {
+    echo "# Managed by ssh_key.sh"
+    [[ -n "$SSH_PORT" ]] && echo "Port $SSH_PORT"
+    echo "PubkeyAuthentication yes"
+    [[ "$DISABLE_PASSWORD" -eq 1 ]] && echo "PasswordAuthentication no"
+  } > "$target"
+  # 保留原文件权限，而非硬编码
+  chmod "$orig_perms" "$target" || true
+
+  # 如果改端口：先放行防火墙 + SELinux（降低锁死风险）
+  if [[ -n "$SSH_PORT" ]]; then
+    open_port_firewall "$SSH_PORT"
+    ensure_selinux_ssh_port "$SSH_PORT"
+  fi
+
+  # 最后再 reload/restart
+  reload_sshd
+
+  if [[ -n "$SSH_PORT" ]]; then
+    warn "端口已配置为 $SSH_PORT。请立即新开终端测试：ssh -p $SSH_PORT user@host"
+  fi
+  if [[ "$DISABLE_PASSWORD" -eq 1 ]]; then
+    warn "已禁用密码登录。务必确认新会话密钥可登录后再断开当前会话。"
+  fi
+  log "✅ SSHD 配置已应用"
+}
+
+# ---------- 同步脚本状态（让菜单显示真实生效值） ----------
+sync_state_from_sshd() {
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  command -v sshd >/dev/null 2>&1 || return 0
+
+  OLD_SSH_PORT="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+  local pa
+  pa="$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2; exit}')"
+  if [[ "$pa" == "no" ]]; then
+    DISABLE_PASSWORD=1
+  elif [[ "$pa" == "yes" ]]; then
+    DISABLE_PASSWORD=0
+  fi
+}
+
+# ---------- 设置项 ----------
+set_ssh_port() {
+  read -r -p "请输入新的 SSH 端口 (1-65535): " p
+  validate_port "$p" || die "非法端口：$p"
+  SSH_PORT="$p"
+  warn "已设置 SSH_PORT=$SSH_PORT（尚未生效，需应用 SSHD 配置）"
 }
 
 toggle_disable_password() {
@@ -205,7 +476,7 @@ toggle_disable_password() {
     log "已关闭：禁用密码登录"
   else
     DISABLE_PASSWORD=1
-    warn "已开启：禁用密码登录（⚠️ 有锁死风险，务必先验证密钥可用）"
+    warn "已开启：禁用密码登录（⚠️ 锁死风险，应用前会做自检）"
   fi
 }
 
@@ -220,40 +491,146 @@ select_target_user() {
   log "✅ 目标用户已切换：$TARGET_USER（home: $TARGET_HOME）"
 }
 
+# ---------- fail2ban：安装与配置 ----------
+install_fail2ban() {
+  require_root
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    log "✅ fail2ban 已安装"
+    return 0
+  fi
+
+  if command -v apt >/dev/null 2>&1; then
+    apt update
+    apt install -y fail2ban
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf -y install fail2ban
+  elif command -v yum >/dev/null 2>&1; then
+    yum -y install fail2ban
+  else
+    die "无法识别包管理器（apt/dnf/yum），请手动安装 fail2ban"
+  fi
+
+  log "✅ fail2ban 安装完成"
+}
+
+configure_fail2ban() {
+  require_root
+  install_fail2ban
+
+  # 端口：优先用你设置的 SSH_PORT；否则用系统当前生效端口；再否则 22
+  local port_to_use=""
+  if [[ -n "$SSH_PORT" ]]; then
+    port_to_use="$SSH_PORT"
+  else
+    sync_state_from_sshd
+    port_to_use="${OLD_SSH_PORT:-22}"
+  fi
+
+  mkdir -p "$(dirname "$F2B_JAIL")"
+  cat >"$F2B_JAIL" <<EOF
+[sshd]
+enabled = true
+port = ${port_to_use}
+backend = systemd
+maxretry = 5
+findtime = 10m
+bantime = 1h
+action = %(action_mwl)s
+EOF
+
+  systemctl enable fail2ban --now
+  systemctl restart fail2ban
+
+  log "✅ fail2ban 已配置：sshd jail 端口=${port_to_use}（文件：$F2B_JAIL）"
+}
+
+show_fail2ban_status() {
+  require_root
+  if ! command -v fail2ban-client >/dev/null 2>&1; then
+    warn "fail2ban 未安装"
+    return 0
+  fi
+  echo
+  echo "====== fail2ban 状态 ======"
+  fail2ban-client status || true
+  echo
+  fail2ban-client status sshd || true
+  echo "=========================="
+  echo
+}
+
+# ---------- 状态展示 ----------
 show_status() {
   refresh_paths
   echo
   echo "====== 当前状态 ======"
   echo "运行用户: $(id -un) (uid=$(id -u))"
   echo "目标用户: $TARGET_USER"
-  echo "目标HOME: $TARGET_HOME"
   echo "authorized_keys: $KEY_FILE"
-  echo "固定公钥条数: ${#SSH_KEYS[@]}"
-  echo "禁用密码登录: $([[ "$DISABLE_PASSWORD" -eq 1 ]] && echo 开启 || echo 关闭)"
+  echo "托管 key 条数: ${#SSH_KEYS[@]}"
+  echo "拟设置 SSH_PORT: ${SSH_PORT:-不修改}"
+  echo "系统当前生效端口: ${OLD_SSH_PORT:-未知（可用菜单查看生效配置）}"
+  echo "禁用密码登录(当前显示): $([[ "$DISABLE_PASSWORD" -eq 1 ]] && echo 开启 || echo 关闭)"
   echo "最近备份: ${LAST_BACKUP:-无}"
-  echo "覆盖模式允许: $([[ "$ALLOW_FORCE_OVERWRITE" -eq 1 ]] && echo 是 || echo 否)"
   echo "======================"
   echo
 }
 
+# ---------- 菜单 ----------
 menu() {
   cat <<'EOF'
-[1] 显示当前状态
-[2] 切换目标用户
-[3] 初始化 ~/.ssh 权限
-[4] 同步固定公钥（只加不减，推荐）
-[5] 同步固定公钥（覆盖模式，危险）
-[6] 查看 authorized_keys
-[7] 切换“禁用密码登录”开关
-[8] 应用 SSHD 配置（确保公钥登录 / 可选禁用密码）
-[9] 备份 sshd_config
-[10] 回滚 sshd_config（回滚到本次运行记录的最后备份）
-[0] 退出
+╔═══════════════════════════════════════════════════════════════════════╗
+║                      SSH 密钥管理工具 v1.0                            ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 📋 推荐执行顺序                                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Step 1: [3] 同步密钥     → 部署公钥到 authorized_keys                  │
+│  Step 2: [5] 设置端口     → 可选，修改 SSH 监听端口                     │
+│  Step 3: [6] 禁用密码     → 可选，关闭密码登录（高风险）                │
+│  Step 4: [7] 防锁死自检   → 必须！应用前检查配置安全性                  │
+│  Step 5: [8] 应用配置     → 写入 SSHD 配置并重载服务                    │
+│  Step 6: [13] fail2ban   → 可选，配置暴力破解防护                       │
+│  Step 7: [11] 关旧端口    → 可选，改端口后关闭原 22 端口                │
+└─────────────────────────────────────────────────────────────────────────┘
+
+─── 基本信息 ───
+  [1] 显示当前状态            [2] 切换目标用户
+
+─── 密钥管理 ───
+  [3] 同步托管密钥区块        [4] 查看 authorized_keys
+
+─── SSHD 配置 ───
+  [5] 设置 SSH 端口           [6] 切换"禁用密码登录"
+  [7] 防锁死自检              [8] 应用 SSHD 配置
+  [9] 显示 SSHD 生效配置
+
+─── 防火墙 ───
+  [10] 放行端口               [11] 删除端口
+  [12] 查看防火墙规则
+
+─── fail2ban ───
+  [13] 安装并配置 fail2ban    [14] 查看 fail2ban 状态
+
+─── 其他 ───
+  [15] 回滚上一次备份         [0] 退出
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ ⚠️  安全警告                                                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│  • 改端口/禁密码后，务必新开终端测试，确认能登录后再关闭当前会话        │
+│  • 禁用密码登录前，必须确保密钥认证已测试成功                           │
+│  • [5][6] 仅设置变量，必须执行 [8] 才会生效                             │
+│  • 备份文件超过 5 个会自动清理旧备份                                    │
+└─────────────────────────────────────────────────────────────────────────┘
 EOF
 }
 
 main_loop() {
   refresh_paths
+  sync_state_from_sshd
+
   while true; do
     clear || true
     menu
@@ -261,22 +638,31 @@ main_loop() {
     case "${choice:-}" in
       1) show_status ;;
       2) select_target_user ;;
-      3) setup_ssh_directory; log "✅ 已初始化 $SSH_DIR 与 $KEY_FILE" ;;
-      4) sync_authorized_keys_append_only ;;
-      5) sync_authorized_keys_force_overwrite ;;
-      6) show_authorized_keys ;;
-      7) toggle_disable_password ;;
-      8) apply_sshd_config ;;
-      9) restore_last_backup ;;
+      3) sync_authorized_keys_managed_block ;;
+      4) show_authorized_keys ;;
+      5) set_ssh_port ;;
+      6) toggle_disable_password ;;
+      7) preflight_lockout_check ;;
+      8) apply_sshd_config; sync_state_from_sshd ;;
+      9) show_effective_sshd_config; sync_state_from_sshd ;;
+      10)
+        read -r -p "请输入要放行的端口: " p
+        open_port_firewall "$p"
+        ;;
+      11)
+        read -r -p "请输入要删除/关闭的端口（如 22）: " p
+        close_port_firewall "$p"
+        ;;
+      12) show_firewall_rules ;;
+      13) configure_fail2ban ;;
+      14) show_fail2ban_status ;;
+      15) restore_last_backup; sync_state_from_sshd ;;
       0) log "Bye."; exit 0 ;;
       *) warn "无效选项：$choice" ;;
     esac
-
     echo
     read -r -p "回车继续..." _
   done
 }
 
-
-# 启动
 main_loop
