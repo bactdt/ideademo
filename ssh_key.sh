@@ -474,18 +474,28 @@ apply_sshd_config() {
 
 # ---------- 同步脚本状态（让菜单显示真实生效值） ----------
 sync_state_from_sshd() {
+  # 从 sshd 的“最终生效配置”同步状态
+  # 注意：在某些系统/配置告警下，sshd -T 会返回非 0
+  # 如果不吞掉退出码，在 set -euo pipefail 下脚本会直接退出（你现在遇到的就是这个）
   [[ "$(id -u)" -eq 0 ]] || return 0
   command -v sshd >/dev/null 2>&1 || return 0
 
-  OLD_SSH_PORT="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+  local out
+  out="$(sshd -T 2>/dev/null || true)"
+
+  # 端口：可能有多个，这里取第一个用于“当前端口显示”
+  OLD_SSH_PORT="$(awk '$1=="port"{print $2; exit}' <<<"$out" || true)"
+
+  # 密码登录状态
   local pa
-  pa="$(sshd -T 2>/dev/null | awk '$1=="passwordauthentication"{print $2; exit}')"
+  pa="$(awk '$1=="passwordauthentication"{print $2; exit}' <<<"$out" || true)"
   if [[ "$pa" == "no" ]]; then
     DISABLE_PASSWORD=1
   elif [[ "$pa" == "yes" ]]; then
     DISABLE_PASSWORD=0
   fi
 }
+
 
 # ---------- 设置项 ----------
 set_ssh_port() {
