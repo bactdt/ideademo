@@ -7,6 +7,49 @@
 set -euo pipefail
 IFS=$'\n\t'
 umask 077
+# ===================== 通用工具函数（必须先定义） =====================
+
+ts() { date '+%F %T'; }
+
+log()  { echo "[$(ts)] [INFO]  $*" >&2; }
+warn() { echo "[$(ts)] [WARN]  $*" >&2; }
+die()  { echo "[$(ts)] [ERROR] $*" >&2; exit 1; }
+
+# 需要 root 才能继续（脚本多处会调用）
+require_root() {
+  local uid
+  uid="${EUID:-$(id -u)}"
+  if [[ "$uid" -ne 0 ]]; then
+    echo "[$(ts)] [ERROR] 必须以 root 权限运行。" >&2
+    if command -v sudo >/dev/null 2>&1; then
+      echo "[$(ts)] [ERROR] 请使用：sudo bash $0" >&2
+    else
+      echo "[$(ts)] [ERROR] 系统无 sudo，请切换到 root 用户再运行。" >&2
+    fi
+    exit 1
+  fi
+}
+
+# 端口校验：1-65535 的纯数字
+validate_port() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  (( p >= 1 && p <= 65535 )) || return 1
+  return 0
+}
+
+# 如果你后面有 refresh_paths，这里提供一个“安全兜底”
+# 有定义就用你自己的；没定义也不会炸
+refresh_paths() { :; }
+
+# 如果你后面有 sync_state_from_sshd，这里也提供兜底
+sync_state_from_sshd() { return 0; }
+
+# 如果你后面有 show_status，这里兜底（避免菜单一开始就报错）
+show_status() {
+  echo "（show_status 未实现：请在脚本其他部分提供完整实现）"
+}
+
 
 # 设置安全 PATH，防止 PATH 污染攻击
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
