@@ -41,7 +41,10 @@ TARGET_HOME=""
 AUTH_KEYS_FILE=""
 CURRENT_SSH_PORT="22"
 PENDING_SSH_PORT=""
+# 当前值从 sshd_config 读取；DISABLE_PASSWORD 作为“待应用”的期望值，避免被状态刷新覆盖
+CURRENT_DISABLE_PASSWORD="no"
 DISABLE_PASSWORD="no"
+PASSWORD_TOUCHED=0
 
 # ===================== 临时文件清理 =====================
 TEMP_FILES=()
@@ -71,7 +74,9 @@ detect_firewall_backend() {
   
   if command -v nft >/dev/null 2>&1; then
     local nft_rules
-    nft_rules=$(nft list ruleset 2>/dev/null | grep -c "chain" || echo "0")
+    # grep -c 在“0 匹配”时会输出 0 但退出码为 1；再加上 || echo 0 会变成两行 "0\n0"
+    nft_rules=$(nft list ruleset 2>/dev/null | grep -c "chain" || true)
+    [[ -z "$nft_rules" ]] && nft_rules=0
     if [[ "$nft_rules" -gt 0 ]]; then
       echo "nftables"; return 0
     fi
@@ -252,12 +257,18 @@ refresh_paths() {
 }
 
 sync_state_from_sshd() {
-  CURRENT_SSH_PORT=$(grep -E "^Port\s+" "$SSHD_MAIN" 2>/dev/null | awk '{print $2}' | head -1)
+  # 在 set -euo pipefail 下，grep 找不到匹配会返回 1，导致整个脚本直接退出。
+  # 这里把“未匹配”视为正常情况（使用默认值）。
+  CURRENT_SSH_PORT=$( (grep -E "^Port\s+" "$SSHD_MAIN" 2>/dev/null || true) | awk '{print $2}' | head -1 )
   [[ -z "$CURRENT_SSH_PORT" ]] && CURRENT_SSH_PORT="22"
-  
+
   local pwd_auth
-  pwd_auth=$(grep -E "^PasswordAuthentication\s+" "$SSHD_MAIN" 2>/dev/null | awk '{print $2}' | head -1)
-  [[ "$pwd_auth" == "no" ]] && DISABLE_PASSWORD="yes" || DISABLE_PASSWORD="no"
+  pwd_auth=$( (grep -E "^PasswordAuthentication\s+" "$SSHD_MAIN" 2>/dev/null || true) | awk '{print $2}' | head -1 )
+  [[ "$pwd_auth" == "no" ]] && CURRENT_DISABLE_PASSWORD="yes" || CURRENT_DISABLE_PASSWORD="no"
+  # 如果用户还没做“切换密码登录”，则让待应用值跟随当前值；一旦切换过，就不再被刷新覆盖
+  if [[ "${PASSWORD_TOUCHED:-0}" -eq 0 ]]; then
+    DISABLE_PASSWORD="$CURRENT_DISABLE_PASSWORD"
+  fi
 }
 
 # ===================== 显示状态 =====================
@@ -275,7 +286,8 @@ show_status() {
   print_menu_sep
   print_row "当前 SSH 端口" "$CURRENT_SSH_PORT"
   print_row "待应用端口" "${PENDING_SSH_PORT:-(无)}"
-  print_row "禁用密码登录" "$DISABLE_PASSWORD"
+  print_row "密码登录(当前禁用?)" "$CURRENT_DISABLE_PASSWORD"
+  print_row "密码登录(待应用禁用?)" "$DISABLE_PASSWORD"
   print_menu_sep
   print_row "防火墙后端" "$fw_backend"
   print_row "托管公钥数量" "${#SSH_KEYS[@]}"
@@ -318,17 +330,24 @@ sync_fixed_keys_overwrite() {
   refresh_paths
   setup_ssh_directory
   backup_file "$AUTH_KEYS_FILE"
-  
-  [[ -f "$AUTH_KEYS_FILE" ]] && grep -q "$MANAGED_BEGIN" "$AUTH_KEYS_FILE" && \
-    sed -i "/$MANAGED_BEGIN/,/$MANAGED_END/d" "$AUTH_KEYS_FILE"
-  
+
+  # “覆盖”按直觉应当是：用托管公钥完全重建 authorized_keys
+  # 旧实现只替换托管区块，文件里其他手工 key 会保留，用户会感觉“没覆盖”。
+  local tmp
+  tmp="$(mktemp)"
+  TEMP_FILES+=("$tmp")
+
   {
     echo "$MANAGED_BEGIN"
     printf '%s\n' "${SSH_KEYS[@]}"
     echo "$MANAGED_END"
-  } >> "$AUTH_KEYS_FILE"
-  
-  log "托管区块已覆盖更新，共 ${#SSH_KEYS[@]} 个公钥"
+  } > "$tmp"
+
+  cat "$tmp" > "$AUTH_KEYS_FILE"
+  chmod 600 "$AUTH_KEYS_FILE"
+  [[ "$TARGET_USER" != "root" ]] && chown "$TARGET_USER:$TARGET_USER" "$AUTH_KEYS_FILE" || true
+
+  log "authorized_keys 已覆盖重建，共 ${#SSH_KEYS[@]} 个公钥"
 }
 
 show_authorized_keys() {
@@ -339,8 +358,9 @@ show_authorized_keys() {
 }
 
 toggle_disable_password() {
+  PASSWORD_TOUCHED=1
   [[ "$DISABLE_PASSWORD" == "yes" ]] && DISABLE_PASSWORD="no" || DISABLE_PASSWORD="yes"
-  log "禁用密码登录 = $DISABLE_PASSWORD (需应用配置生效)"
+  log "禁用密码登录(待应用) = $DISABLE_PASSWORD (需应用配置生效)"
 }
 
 set_ssh_port() {
@@ -382,7 +402,7 @@ apply_sshd_config() {
     PENDING_SSH_PORT=""
   fi
   
-  systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || warn "SSHD 重启失败"
+  systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || warn "SSHD 重启失败"
   log "SSHD 配置已应用"
 }
 
@@ -403,6 +423,39 @@ restore_last_backup() {
   cp "$LAST_BACKUP" "$original"
   log "已回滚: $LAST_BACKUP"
   systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true
+}
+
+# ===================== UFW（安装/启用） =====================
+install_enable_ufw() {
+  require_root
+  sync_state_from_sshd
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    log "正在安装 ufw..."
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update -qq && apt-get install -y ufw -qq
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y epel-release || true
+      yum install -y ufw || die "yum 安装 ufw 失败"
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y ufw || die "dnf 安装 ufw 失败"
+    else
+      die "无法安装 ufw（未识别包管理器）"
+    fi
+  fi
+
+  local ssh_port
+  ssh_port="$CURRENT_SSH_PORT"
+  [[ -z "$ssh_port" ]] && ssh_port=22
+
+  # 重要：先放行 SSH 再启用，避免把自己锁门外
+  ufw --force reset >/dev/null 2>&1 || true
+  ufw default deny incoming >/dev/null 2>&1 || true
+  ufw default allow outgoing >/dev/null 2>&1 || true
+  ufw allow "$ssh_port/tcp" comment "SSH" >/dev/null 2>&1 || true
+
+  ufw --force enable >/dev/null 2>&1 || die "ufw enable 失败"
+  log "UFW 已启用：默认拒绝入站，已放行 SSH 端口 $ssh_port/tcp"
 }
 
 # ===================== fail2ban =====================
@@ -453,7 +506,8 @@ main_loop() {
   sync_state_from_sshd
   
   while true; do
-    clear
+    # 非交互/无 TERM 环境下 clear 会报错并在 set -e 下直接退出
+    if [[ -t 1 && -n "${TERM:-}" ]]; then clear; fi
     show_status
     
     print_menu_header
@@ -469,6 +523,7 @@ main_loop() {
     print_menu_sep
     print_menu_item "[14] 配置 fail2ban      [15] 查看 fail2ban"
     print_menu_item "[16] 备份 sshd_config   [17] 回滚 sshd_config"
+    print_menu_item "[18] 安装/启用 UFW (放行SSH)"
     print_menu_sep
     print_menu_item "[0] 退出"
     print_line
@@ -492,6 +547,7 @@ main_loop() {
       15) show_fail2ban_status ;;
       16) backup_file "$SSHD_MAIN" ;;
       17) restore_last_backup ;;
+      18) install_enable_ufw ;;
       0) log "Bye."; exit 0 ;;
       *) warn "无效选项" ;;
     esac
