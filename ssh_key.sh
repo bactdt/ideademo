@@ -2,7 +2,7 @@
 # =============================================================================
 # 脚本名称: ssh_key.sh
 # 描    述: SSH 密钥管理工具 - 托管密钥同步、SSHD 配置、防火墙、fail2ban
-# 版    本: v1.4 (界面美化)
+# 版    本: v1.5 (修复 stdin EOF 死循环；pad_to 改为纯 bash 实现)
 # =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
@@ -180,34 +180,67 @@ BOX_INNER=62
 pad_to() {
   local text="$1"
   local width="$2"
-  python3 - "$text" "$width" <<'PY'
-import sys, unicodedata
-text = sys.argv[1]
-width = int(sys.argv[2])
-
-def w(s: str) -> int:
-    n = 0
-    for ch in s:
-        if ch == "\t":
-            n += 4
-            continue
-        if unicodedata.east_asian_width(ch) in ("F","W"):
-            n += 2
-        else:
-            n += 1
-    return n
-
-cur = w(text)
-if cur < width:
-    sys.stdout.write(text + " " * (width - cur))
-else:
-    out = ""
-    for ch in text:
-        if w(out + ch) > width:
-            break
-        out += ch
-    sys.stdout.write(out + " " * max(0, width - w(out)))
-PY
+  local cur=0
+  local ch cp i=0
+  local len=${#text}
+  while (( i < len )); do
+    ch="${text:$i:1}"
+    printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
+    # 东亚全角/宽字符范围（近似）：U+1100–U+11FF, U+2E80–U+303F, U+3040–U+9FFF,
+    # U+A000–U+A4CF, U+AC00–U+D7AF, U+F900–U+FAFF, U+FE10–U+FE6F, U+FF00–U+FFEF,
+    # U+1F300–U+1F9FF 等常见范围
+    if (( (cp >= 0x1100 && cp <= 0x11FF) ||
+          (cp >= 0x2E80 && cp <= 0x303F) ||
+          (cp >= 0x3040 && cp <= 0x9FFF) ||
+          (cp >= 0xA000 && cp <= 0xA4CF) ||
+          (cp >= 0xAC00 && cp <= 0xD7AF) ||
+          (cp >= 0xF900 && cp <= 0xFAFF) ||
+          (cp >= 0xFE10 && cp <= 0xFE6F) ||
+          (cp >= 0xFF00 && cp <= 0xFFEF) ||
+          (cp >= 0x1F300 && cp <= 0x1F9FF) )); then
+      (( cur += 2 ))
+    else
+      (( cur += 1 ))
+    fi
+    (( i++ ))
+  done
+  local pad=$(( width - cur ))
+  if (( pad > 0 )); then
+    printf '%s%*s' "$text" "$pad" ""
+  elif (( pad == 0 )); then
+    printf '%s' "$text"
+  else
+    # 文本超出宽度：逐字符截断，与原 python3 版本行为一致
+    local out="" out_cur=0 ch_w
+    i=0
+    while (( i < len )); do
+      ch="${text:$i:1}"
+      printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
+      if (( (cp >= 0x1100 && cp <= 0x11FF) ||
+            (cp >= 0x2E80 && cp <= 0x303F) ||
+            (cp >= 0x3040 && cp <= 0x9FFF) ||
+            (cp >= 0xA000 && cp <= 0xA4CF) ||
+            (cp >= 0xAC00 && cp <= 0xD7AF) ||
+            (cp >= 0xF900 && cp <= 0xFAFF) ||
+            (cp >= 0xFE10 && cp <= 0xFE6F) ||
+            (cp >= 0xFF00 && cp <= 0xFFEF) ||
+            (cp >= 0x1F300 && cp <= 0x1F9FF) )); then
+        ch_w=2
+      else
+        ch_w=1
+      fi
+      (( out_cur + ch_w > width )) && break
+      out+="$ch"
+      (( out_cur += ch_w ))
+      (( i++ ))
+    done
+    local tail_pad=$(( width - out_cur ))
+    if (( tail_pad > 0 )); then
+      printf '%s%*s' "$out" "$tail_pad" ""
+    else
+      printf '%s' "$out"
+    fi
+  fi
 }
 
 print_line() {
@@ -297,7 +330,7 @@ show_status() {
 
 # ===================== SSH 相关操作 =====================
 select_target_user() {
-  read -r -p "输入目标用户名 [默认: root]: " input_user
+  read -r -p "输入目标用户名 [默认: root]: " input_user || return 0
   TARGET_USER="${input_user:-root}"
   refresh_paths
   log "已切换到用户: $TARGET_USER"
@@ -364,7 +397,7 @@ toggle_disable_password() {
 }
 
 set_ssh_port() {
-  read -r -p "输入新的 SSH 端口 [当前: $CURRENT_SSH_PORT]: " new_port
+  read -r -p "输入新的 SSH 端口 [当前: $CURRENT_SSH_PORT]: " new_port || return 0
   [[ -z "$new_port" ]] && { log "保持当前端口"; return; }
   validate_port "$new_port" || { warn "端口无效"; return; }
   PENDING_SSH_PORT="$new_port"
@@ -528,7 +561,7 @@ main_loop() {
     print_menu_item "[0] 退出"
     print_line
     
-    read -r -p "请选择: " choice
+    read -r -p "请选择: " choice || { log "stdin 已关闭，退出"; exit 0; }
     case "$choice" in
       1) show_status ;;
       2) select_target_user ;;
@@ -540,8 +573,8 @@ main_loop() {
       8) set_ssh_port ;;
       9) apply_sshd_config ;;
       10) show_firewall_rules ;;
-      11) read -r -p "端口: " port; [[ -n "$port" ]] && open_port_firewall "$port" ;;
-      12) read -r -p "端口: " port; [[ -n "$port" ]] && close_port_firewall "$port" ;;
+      11) read -r -p "端口: " port || true; [[ -n "$port" ]] && open_port_firewall "$port" ;;
+      12) read -r -p "端口: " port || true; [[ -n "$port" ]] && close_port_firewall "$port" ;;
       13) persist_iptables_rules ;;
       14) configure_fail2ban ;;
       15) show_fail2ban_status ;;
@@ -553,7 +586,7 @@ main_loop() {
     esac
     
     echo ""
-    read -r -p "回车继续..." _
+    read -r -p "回车继续..." _ || exit 0
   done
 }
 
