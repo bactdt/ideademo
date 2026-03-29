@@ -458,6 +458,107 @@ restore_last_backup() {
   systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true
 }
 
+# ===================== UFW Docker after.rules =====================
+modify_ufw_after_rules_for_docker_port() {
+  require_root
+  local p="$1"
+  validate_port "$p" || die "非法端口：$p"
+
+  local file="/etc/ufw/after.rules"
+  [[ -f "$file" ]] || die "$file 不存在"
+
+  backup_file "$file"
+
+  local rule="-A ufw-user-forward -p tcp --dport $p -j ACCEPT"
+  local mark="# ssh_key.sh docker allow $p/tcp"
+
+  # 幂等：已存在即跳过
+  if grep -qF "$rule" "$file" 2>/dev/null; then
+    log "after.rules 已存在 Docker 放行规则: $p/tcp"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  TEMP_FILES+=("$tmp")
+
+  # 优先插入到 '# BEGIN UFW AND DOCKER' 对应 filter 块的 COMMIT 前
+  awk -v rule="$rule" -v mark="$mark" '
+    BEGIN {in_block=0; in_filter=0; inserted=0}
+    /^# BEGIN UFW AND DOCKER/ {in_block=1; print; next}
+    in_block && /^\*filter/ {in_filter=1; print; next}
+    in_block && in_filter && /^COMMIT/ && inserted==0 {
+      print mark
+      print rule
+      inserted=1
+      print
+      next
+    }
+    {print}
+    /^# END UFW AND DOCKER/ {in_block=0; in_filter=0}
+  ' "$file" > "$tmp"
+
+  # 若未插入（无该区块），退化为在最后一个 COMMIT 前插入
+  if ! grep -qF "$rule" "$tmp"; then
+    awk -v rule="$rule" -v mark="$mark" '
+      {lines[NR]=$0}
+      END {
+        last_commit=0
+        for (i=1;i<=NR;i++) if (lines[i] ~ /^COMMIT$/) last_commit=i
+        if (last_commit==0) {
+          for (i=1;i<=NR;i++) print lines[i]
+          print "*filter"
+          print ":ufw-user-forward - [0:0]"
+          print mark
+          print rule
+          print "COMMIT"
+        } else {
+          for (i=1;i<=NR;i++) {
+            if (i==last_commit) {
+              print mark
+              print rule
+            }
+            print lines[i]
+          }
+        }
+      }
+    ' "$tmp" > "${tmp}.2"
+    mv "${tmp}.2" "$tmp"
+  fi
+
+  cat "$tmp" > "$file"
+  chmod 640 "$file"
+
+  local reload_err
+  reload_err="$(ufw reload 2>&1)" \
+    && log "已写入 after.rules 并重载 UFW: 放行 Docker 端口 $p/tcp" \
+    || warn "规则已写入，但 ufw reload 失败（${reload_err:-无详细信息}），请手动执行: ufw reload"
+}
+
+configure_ufw_docker_rules_menu() {
+  while true; do
+    echo ""
+    print_line
+    printf "|%s|\n" "$(pad_to " UFW Docker 规则配置" "$BOX_INNER")"
+    print_line
+    print_menu_item "[1] 放行 Docker TCP 端口 (写入 /etc/ufw/after.rules)"
+    print_menu_item "[2] 返回上级菜单"
+    print_line
+
+    read -r -p "请选择: " sub || return 0
+    case "$sub" in
+      1)
+        read -r -p "输入要放行的 Docker 端口(TCP): " port || true
+        [[ -n "${port:-}" ]] && modify_ufw_after_rules_for_docker_port "$port"
+        ;;
+      2) return 0 ;;
+      *) warn "无效选项" ;;
+    esac
+    echo ""
+    read -r -p "回车继续..." _ || return 0
+  done
+}
+
 # ===================== UFW（安装/启用） =====================
 install_enable_ufw() {
   require_root
@@ -557,6 +658,7 @@ main_loop() {
     print_menu_item "[14] 配置 fail2ban      [15] 查看 fail2ban"
     print_menu_item "[16] 备份 sshd_config   [17] 回滚 sshd_config"
     print_menu_item "[18] 安装/启用 UFW (放行SSH)"
+    print_menu_item "[19] UFW Docker 规则配置"
     print_menu_sep
     print_menu_item "[0] 退出"
     print_line
@@ -581,6 +683,7 @@ main_loop() {
       16) backup_file "$SSHD_MAIN" ;;
       17) restore_last_backup ;;
       18) install_enable_ufw ;;
+      19) configure_ufw_docker_rules_menu ;;
       0) log "Bye."; exit 0 ;;
       *) warn "无效选项" ;;
     esac
