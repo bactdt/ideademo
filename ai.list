@@ -1,0 +1,225 @@
+# =====================
+# Gemini & Bard
+# =====================
+# Google AI 开发文档
+DOMAIN,ai.google.dev
+# MakerSuite 后端
+DOMAIN,alkalimakersuite-pa.clients6.google.com
+# 通用生成式语言 API
+DOMAIN,generativelanguage.googleapis.com
+# MakerSuite 控制台
+DOMAIN,makersuite.google.com
+# Colab 相关
+DOMAIN-KEYWORD,colab
+# 开发者个人资料
+DOMAIN-KEYWORD,developerprofiles
+# 生成式语言关键字
+DOMAIN-KEYWORD,generativelanguage
+# Google OAuth / API 通用域
+DOMAIN-SUFFIX,apis.google.com
+# Bard 入口（旧）
+DOMAIN-SUFFIX,bard.google.com
+# DeepMind 官网
+DOMAIN-SUFFIX,deepmind.com
+# DeepMind 相关 Google 域
+DOMAIN-SUFFIX,deepmind.google
+# Gemini Web 入口
+DOMAIN-SUFFIX,gemini.google.com
+# Gemini 品牌域
+DOMAIN-SUFFIX,generativeai.google
+# Bard/Gemini 主动提示后端
+DOMAIN-SUFFIX,proactivebackend-pa.googleapis.com
+
+# =====================
+# Claude
+# =====================
+# Fathom 分析（Claude Web 使用）
+DOMAIN,cdn.usefathom.com
+# Anthropic 官网
+DOMAIN-SUFFIX,anthropic.com
+# Claude Web
+DOMAIN-SUFFIX,claude.ai
+
+# =====================
+# OpenAI / ChatGPT
+# =====================
+# Datadog 浏览器监控
+DOMAIN,browser-intake-datadoghq.com
+# ChatGPT Cloudflare CDN
+DOMAIN,chat.openai.com.cdn.cloudflare.net
+# Arkose Labs 人机验证
+DOMAIN,openai-api.arkoselabs.com
+# OpenAI API 在 Azure Front Door 的入口
+DOMAIN,openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net
+# OpenAI 静态资源存储（Blob）
+DOMAIN,openaicomproductionae4b.blob.core.windows.net
+# OpenAI 静态资源 AzureEdge CDN
+DOMAIN,production-openaicom-storage.azureedge.net
+# Cloudflare Insights 统计
+DOMAIN,static.cloudflareinsights.com
+
+# ChatGPT / ai.com 短域名
+DOMAIN-SUFFIX,ai.com
+# Algolia 搜索服务
+DOMAIN-SUFFIX,algolia.net
+# Statsig A/B 实验平台
+DOMAIN-SUFFIX,api.statsig.com
+# Auth0 身份认证
+DOMAIN-SUFFIX,auth0.com
+# ChatGPT 新域名
+DOMAIN-SUFFIX,chatgpt.com
+# ChatGPT 实时音视频（LiveKit）
+DOMAIN-SUFFIX,chatgpt.livekit.cloud
+# Arkose Labs 客户端 API
+DOMAIN-SUFFIX,client-api.arkoselabs.com
+# Statsig 事件上报
+DOMAIN-SUFFIX,events.statsigapi.net
+# FeatureGates 实验开关
+DOMAIN-SUFFIX,featuregates.org
+# LiveKit 媒体服务器
+DOMAIN-SUFFIX,host.livekit.cloud
+# IdenTrust 证书链
+DOMAIN-SUFFIX,identrust.com
+# Intercom 在线客服
+DOMAIN-SUFFIX,intercom.io
+DOMAIN-SUFFIX,intercomcdn.com
+# LaunchDarkly 灯塔（特性开关）
+DOMAIN-SUFFIX,launchdarkly.com
+# OpenAI 静态资源
+DOMAIN-SUFFIX,oaistatic.com
+# ChatGPT 附件 / 图片等用户内容
+DOMAIN-SUFFIX,oaiusercontent.com
+# ObserveIT 行为监控
+DOMAIN-SUFFIX,observeit.net
+# OpenAI 官网
+DOMAIN-SUFFIX,openai.com
+# OpenAI AzureEdge 站点
+DOMAIN-SUFFIX,openaiapi-site.azureedge.net
+# OpenAI 图像/CDN
+DOMAIN-SUFFIX,openaicom.imgix.net
+# Segment 分析
+DOMAIN-SUFFIX,segment.io
+# Sentry 错误上报
+DOMAIN-SUFFIX,sentry.io
+# Stripe 支付
+DOMAIN-SUFFIX,stripe.com
+# LiveKit TURN 服务器
+DOMAIN-SUFFIX,turn.livekit.cloud
+
+# 域名关键字匹配 openai
+DOMAIN-KEYWORD,openai
+
+# OpenAI / ChatGPT 相关的 IP 段
+IP-CIDR,24.199.123.28/32,no-resolve
+IP-CIDR,64.23.132.171/32,no-resolve
+# AS20473 部分用于 OpenAI/ChatGPT 接入
+IP-ASN,20473,no-resolve
+
+# =====================
+# Copilot (Microsoft)
+# =====================
+# MSN API（Copilot 主页内容）
+DOMAIN,api.msn.com
+# Statsig A/B 实验
+DOMAIN,api.statsig.com
+# MSN 静态资源
+DOMAIN,assets.msn.com
+# Datadog 监控
+DOMAIN,browser-intake-datadoghq.com
+# 共享的 ChatGPT CDN（部分场景）
+DOMAIN,chat.openai.com.cdn.cloudflare.net
+# Copilot Web 入口
+DOMAIN,copilot.microsoft.com
+# Copilot 可视化数据网关
+DOMAIN,gateway.bingviz.microsoft.net
+DOMAIN,gateway.bingviz.microsoftapp.net
+# AppCenter 统计
+DOMAIN,in.appcenter.ms
+# 位置服务
+DOMAIN,location.microsoft.com
+# Office Web Apps（Copilot in M365）
+DOMAIN,odc.officeapps.live.com
+# Arkose Labs 人机验证（共用）
+DOMAIN,openai-api.arkoselabs.com
+# OpenAI Blob 存储（共用）
+DOMAIN,openaicomproductionae4b.blob.core.windows.net
+# OpenAI 静态资源（共用）
+DOMAIN,production-openaicom-storage.azureedge.net
+# Cloudflare Insights
+DOMAIN,static.cloudflareinsights.com
+# Bing 重定向
+DOMAIN,r.bing.com
+# 遥测事件
+DOMAIN,self.events.data.microsoft.com
+# Bing 搜索 API
+DOMAIN,services.bingapis.com
+# Copilot 用的 Bing（Sydney）
+DOMAIN,sydney.bing.com
+# Bing 主站
+# DOMAIN,www.bing.com
+
+# Copilot 相关通用后端域（大多与 OpenAI 共用）
+DOMAIN-SUFFIX,algolia.net
+DOMAIN-SUFFIX,api.microsoftapp.net
+DOMAIN-SUFFIX,auth0.com
+DOMAIN-SUFFIX,bing-shopping.microsoft-falcon.io
+DOMAIN-SUFFIX,challenges.cloudflare.com
+DOMAIN-SUFFIX,chatgpt.com
+DOMAIN-SUFFIX,chatgpt.livekit.cloud
+DOMAIN-SUFFIX,client-api.arkoselabs.com
+DOMAIN-SUFFIX,edgeservices.bing.com
+DOMAIN-SUFFIX,events.statsigapi.net
+DOMAIN-SUFFIX,featuregates.org
+DOMAIN-SUFFIX,host.livekit.cloud
+DOMAIN-SUFFIX,identrust.com
+DOMAIN-SUFFIX,intercom.io
+DOMAIN-SUFFIX,intercomcdn.com
+DOMAIN-SUFFIX,launchdarkly.com
+DOMAIN-SUFFIX,oaistatic.com
+DOMAIN-SUFFIX,oaiusercontent.com
+DOMAIN-SUFFIX,observeit.net
+DOMAIN-SUFFIX,openai.com
+DOMAIN-SUFFIX,openaiapi-site.azureedge.net
+DOMAIN-SUFFIX,openaicom.imgix.net
+DOMAIN-SUFFIX,segment.io
+DOMAIN-SUFFIX,sentry.io
+DOMAIN-SUFFIX,stripe.com
+DOMAIN-SUFFIX,turn.livekit.cloud
+# OpenAI API 相关关键字（Copilot 调用）
+DOMAIN-KEYWORD,openaicom-api
+# Copilot 使用的 ASN（微软+Vultr 部分）
+IP-CIDR,24.199.123.28/32,no-resolve
+IP-CIDR,64.23.132.171/32,no-resolve
+IP-ASN,14061,no-resolve
+IP-ASN,20473,no-resolve
+# x.ai（Grok）
+DOMAIN-SUFFIX,x.ai
+
+# =====================
+# Other AI 服务
+# =====================
+# LMSYS 评测平台
+DOMAIN-SUFFIX,lmsys.org
+# Poe 多模型聚合
+DOMAIN-SUFFIX,poe.com
+# Cohere 关键字
+DOMAIN-KEYWORD,cohere
+# Coze Bot 平台
+DOMAIN-SUFFIX,coze.com
+# JetBrains Grazie AI 助手
+# DOMAIN-SUFFIX,grazie.ai
+DOMAIN-SUFFIX,grazie.aws.intellij.net
+# Kuaishou Kling 视频生成
+# DOMAIN-SUFFIX,klingai.com
+# Sider 浏览器 AI
+DOMAIN-SUFFIX,sider.ai
+# Mistral AI
+# DOMAIN-SUFFIX,mistral.ai
+# Codeium 插件数据域
+# DOMAIN-SUFFIX,codeiumdata.com
+# DOMAIN-SUFFIX,codeium.com
+# 火山引擎 hcompany
+# DOMAIN-SUFFIX,hcompany.ai
+# DOMAIN-KEYWORD,hcompany
+# Groq LPU 推理
+# DOMAIN-KEYWORD,groq
