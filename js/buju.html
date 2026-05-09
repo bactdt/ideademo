@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sticky / Flexbox / Grid 交互演示</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f7fb;
+      color: #1f2937;
+      line-height: 1.5;
+    }
+    .page {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 32px;
+    }
+    .intro {
+      margin: 0 0 24px;
+      color: #4b5563;
+    }
+    .grid-main {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+    }
+    .panel {
+      background: #fff;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+      min-height: 540px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .panel h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+    .desc {
+      margin: 0;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .toolbar label {
+      font-size: 13px;
+      color: #374151;
+    }
+    .toolbar select,
+    .toolbar button,
+    .toolbar input {
+      padding: 8px 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      background: #fff;
+      font-size: 13px;
+    }
+    .toolbar button {
+      cursor: pointer;
+      background: #111827;
+      color: white;
+      border: none;
+    }
+    .toolbar button.secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    .demo-box {
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      background: #fafafa;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .live-code {
+      margin: 0;
+      padding: 12px;
+      border-radius: 12px;
+      background: #111827;
+      color: #d1fae5;
+      font-size: 13px;
+      line-height: 1.6;
+      overflow: auto;
+    }
+
+    .change-hint {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #fef3c7;
+      color: #92400e;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .axis-label {
+      position: absolute;
+      font-size: 12px;
+      font-weight: 700;
+      pointer-events: none;
+      opacity: .75;
+    }
+
+    .axis-x {
+      left: 18px;
+      right: 18px;
+      top: 50%;
+      height: 0;
+      border-top: 2px dashed rgba(37,99,235,.35);
+    }
+
+    .axis-x::after {
+      content: "主轴 main axis";
+      position: absolute;
+      right: 0;
+      top: -22px;
+      color: #2563eb;
+    }
+
+    .axis-y {
+      left: 50%;
+      top: 18px;
+      bottom: 18px;
+      width: 0;
+      border-left: 2px dashed rgba(16,185,129,.35);
+    }
+
+    .axis-y::after {
+      content: "交叉轴 cross axis";
+      position: absolute;
+      left: 8px;
+      bottom: 0;
+      color: #059669;
+      writing-mode: vertical-rl;
+    }
+
+    /* Position */
+    .position-stage {
+      height: 340px;
+      padding: 16px;
+      border: 2px dashed #cbd5e1;
+      border-radius: 12px;
+      background:
+        linear-gradient(90deg, rgba(148,163,184,.18) 1px, transparent 1px),
+        linear-gradient(rgba(148,163,184,.18) 1px, transparent 1px),
+        #f8fafc;
+      background-size: 32px 32px;
+      overflow: auto;
+    }
+
+    .position-parent {
+      position: relative;
+      min-height: 560px;
+      border: 3px solid #94a3b8;
+      border-radius: 14px;
+      padding: 18px;
+      background: rgba(255,255,255,.72);
+    }
+
+    .position-parent::before {
+      content: "父容器：position: relative";
+      position: absolute;
+      left: 12px;
+      top: -12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #334155;
+      color: white;
+      font-size: 12px;
+    }
+
+    .ghost-box {
+      width: 110px;
+      height: 80px;
+      border: 2px dashed #f97316;
+      border-radius: 12px;
+      background: rgba(249,115,22,.08);
+      color: #9a3412;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: 12px;
+      margin-top: 36px;
+    }
+
+    .position-target {
+      width: 110px;
+      height: 80px;
+      border-radius: 12px;
+      background: #f97316;
+      color: white;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      box-shadow: 0 12px 24px rgba(249,115,22,.28);
+      transition: all .3s ease;
+      margin-top: 36px;
+    }
+
+    .position-sibling {
+      width: 160px;
+      padding: 12px;
+      margin-top: 14px;
+      border-radius: 12px;
+      background: #dbeafe;
+      color: #1d4ed8;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    /* Sticky */
+    .sticky-wrap {
+      height: 340px;
+      overflow: auto;
+      border-radius: 12px;
+      background: linear-gradient(180deg, #eff6ff, #ffffff);
+      border: 1px solid #dbeafe;
+    }
+    .sticky-header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 14px 16px;
+      background: #2563eb;
+      color: white;
+      font-weight: 700;
+      box-shadow: 0 4px 10px rgba(37,99,235,.25);
+    }
+    .sticky-list {
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+    .sticky-item {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .sticky-tip {
+      font-size: 13px;
+      color: #2563eb;
+      background: #eff6ff;
+      padding: 10px 12px;
+      border-radius: 10px;
+    }
+
+    /* Flex */
+    .flex-stage {
+      min-height: 340px;
+      display: flex;
+      border: 2px dashed #cbd5e1;
+      border-radius: 12px;
+      padding: 12px;
+      background:
+        linear-gradient(to right, rgba(59,130,246,.06) 0 100%),
+        linear-gradient(to bottom, rgba(16,185,129,.06) 0 100%);
+      gap: 10px;
+      transition: all .25s ease;
+    }
+    .flex-item {
+      min-width: 70px;
+      min-height: 70px;
+      padding: 10px;
+      border-radius: 12px;
+      color: white;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      transition: .25s ease;
+    }
+    .flex-item:nth-child(1) { background: #ef4444; }
+    .flex-item:nth-child(2) { background: #f59e0b; }
+    .flex-item:nth-child(3) { background: #10b981; }
+    .flex-item:nth-child(4) { background: #3b82f6; }
+    .flex-item:nth-child(5) { background: #8b5cf6; }
+
+    /* Grid */
+    .grid-stage {
+      min-height: 340px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-auto-rows: 80px;
+      gap: 10px;
+      padding: 10px;
+      border: 2px dashed #cbd5e1;
+      border-radius: 12px;
+      background: #f8fafc;
+      transition: all .25s ease;
+    }
+    .grid-item {
+      border-radius: 12px;
+      color: white;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      transition: .25s ease;
+    }
+    .grid-item:nth-child(1) { background: #0f766e; }
+    .grid-item:nth-child(2) { background: #2563eb; }
+    .grid-item:nth-child(3) { background: #7c3aed; }
+    .grid-item:nth-child(4) { background: #ea580c; }
+    .grid-item:nth-child(5) { background: #dc2626; }
+    .grid-item:nth-child(6) { background: #16a34a; }
+
+    .note {
+      font-size: 13px;
+      color: #4b5563;
+      background: #f3f4f6;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #111827;
+      color: white;
+      font-size: 12px;
+      margin-right: 6px;
+    }
+    code {
+      background: #eef2ff;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>CSS 布局直观交互演示</h1>
+    <p class="intro">
+      点击选项后，盒子会立刻移动、吸顶、重新排队或重新分格。学生可以一边改 CSS，一边看到页面发生什么变化。
+    </p>
+
+    <div class="grid-main">
+      <!-- Position -->
+      <section class="panel">
+        <h2>1. Position 定位</h2>
+        <p class="desc">适合控制单个元素的位置：相对自己移动、相对父容器定位，或固定在窗口上。</p>
+
+        <div class="toolbar">
+          <label>position：
+            <select id="positionMode">
+              <option value="static">static</option>
+              <option value="relative">relative</option>
+              <option value="absolute">absolute</option>
+              <option value="fixed">fixed</option>
+            </select>
+          </label>
+          <label>top：
+            <select id="positionTop">
+              <option value="0px">0px</option>
+              <option value="30px" selected>30px</option>
+              <option value="80px">80px</option>
+            </select>
+          </label>
+          <label>left：
+            <select id="positionLeft">
+              <option value="0px">0px</option>
+              <option value="40px" selected>40px</option>
+              <option value="120px">120px</option>
+            </select>
+          </label>
+        </div>
+
+        <span class="change-hint" id="positionHint">先选 relative：橙色盒子会离开原位置，但虚线位置还保留。</span>
+
+        <div class="demo-box position-stage">
+          <div class="position-parent" id="positionParent">
+            <div class="ghost-box" id="ghostBox">原来的位置</div>
+            <div class="position-target" id="positionTarget">目标盒子</div>
+            <div class="position-sibling">后面的普通盒子</div>
+          </div>
+        </div>
+
+        <pre class="live-code"><code id="positionCode">position: static;</code></pre>
+
+        <div class="note">
+          <span class="badge">观察</span> static 不受 top/left 影响；relative 会保留原空间；absolute 会脱离文档流；fixed 会固定在窗口右下角。
+        </div>
+      </section>
+
+      <!-- Sticky -->
+      <section class="panel">
+        <h2>2. Sticky 粘性定位</h2>
+        <p class="desc">适合“滚动过程中固定住某个说明条、标题、导航”。</p>
+
+        <div class="toolbar">
+          <label>top：
+            <select id="stickyTop">
+              <option value="0">0px</option>
+              <option value="10px">10px</option>
+              <option value="30px">30px</option>
+              <option value="60px">60px</option>
+            </select>
+          </label>
+          <button id="toggleSticky">关闭 sticky</button>
+        </div>
+
+        <div class="sticky-tip">
+          观察方法：滚动下面这个盒子，看看蓝色标题什么时候“粘住”。
+        </div>
+
+        <div class="demo-box sticky-wrap" id="stickyWrap">
+          <div class="sticky-header" id="stickyHeader">我是 sticky 标题</div>
+          <div class="sticky-list">
+            <div class="sticky-item">内容块 1：页面还没滚到阈值前，它像普通元素一样待在原位置。</div>
+            <div class="sticky-item">内容块 2：一旦滚动到设定的 top 阈值，它就像被“吸”在顶部。</div>
+            <div class="sticky-item">内容块 3：这很适合目录、吸顶标题、分组标题。</div>
+            <div class="sticky-item">内容块 4：你会感觉它介于 relative 和 fixed 之间。</div>
+            <div class="sticky-item">内容块 5：继续往下滚。</div>
+            <div class="sticky-item">内容块 6：还在滚。</div>
+            <div class="sticky-item">内容块 7：现在它应该已经牢牢吸住了。</div>
+            <div class="sticky-item">内容块 8：父容器滚动结束后，它也会停止。</div>
+            <div class="sticky-item">内容块 9：所以 sticky 很依赖父容器。</div>
+            <div class="sticky-item">内容块 10：这就是它和 fixed 的关键差异之一。</div>
+          </div>
+        </div>
+
+        <div class="note">
+          <span class="badge">场景</span> 吸顶目录 / 通讯录分组标题 / 侧边说明栏
+        </div>
+      </section>
+
+      <!-- Flexbox -->
+      <section class="panel">
+        <h2>3. Flexbox</h2>
+        <p class="desc">适合“同一条轴线上的排列、对齐、分配剩余空间”。</p>
+
+        <div class="toolbar">
+          <label>direction：
+            <select id="flexDirection">
+              <option value="row">row</option>
+              <option value="column">column</option>
+            </select>
+          </label>
+          <label>justify：
+            <select id="justifyContent">
+              <option value="flex-start">flex-start</option>
+              <option value="center">center</option>
+              <option value="space-between">space-between</option>
+              <option value="space-around">space-around</option>
+              <option value="space-evenly">space-evenly</option>
+            </select>
+          </label>
+          <label>align：
+            <select id="alignItems">
+              <option value="stretch">stretch</option>
+              <option value="flex-start">flex-start</option>
+              <option value="center">center</option>
+              <option value="flex-end">flex-end</option>
+            </select>
+          </label>
+          <label>wrap：
+            <select id="flexWrap">
+              <option value="nowrap">nowrap</option>
+              <option value="wrap">wrap</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="demo-box flex-stage" id="flexStage">
+          <span class="axis-label axis-x" id="mainAxis"></span>
+          <span class="axis-label axis-y" id="crossAxis"></span>
+          <div class="flex-item">1</div>
+          <div class="flex-item">2</div>
+          <div class="flex-item">3</div>
+          <div class="flex-item">4</div>
+          <div class="flex-item">5</div>
+        </div>
+
+        <div class="note">
+          把它想成“排队站位”：<code>flex-direction</code> 决定队伍方向，<code>justify-content</code> 管主轴排法，<code>align-items</code> 管侧轴对齐。
+        </div>
+      </section>
+
+      <!-- Grid -->
+      <section class="panel">
+        <h2>4. Grid</h2>
+        <p class="desc">适合“先画出行和列的格子，再把模块塞进去”。</p>
+
+        <div class="toolbar">
+          <label>列数：
+            <select id="gridCols">
+              <option value="2">2 列</option>
+              <option value="3" selected>3 列</option>
+              <option value="4">4 列</option>
+            </select>
+          </label>
+          <label>gap：
+            <select id="gridGap">
+              <option value="6px">6px</option>
+              <option value="10px" selected>10px</option>
+              <option value="18px">18px</option>
+            </select>
+          </label>
+          <button class="secondary" id="toggleFeature">切换 2 号卡片跨列</button>
+        </div>
+
+        <div class="demo-box grid-stage" id="gridStage">
+          <div class="grid-item">1</div>
+          <div class="grid-item" id="featureCard">2</div>
+          <div class="grid-item">3</div>
+          <div class="grid-item">4</div>
+          <div class="grid-item">5</div>
+          <div class="grid-item">6</div>
+        </div>
+
+        <div class="note">
+          把它想成“先在地上画格子，再摆桌子”：你先决定几列，再决定某个元素要不要占两格、三格。
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    // Position
+    const positionMode = document.getElementById('positionMode');
+    const positionTop = document.getElementById('positionTop');
+    const positionLeft = document.getElementById('positionLeft');
+    const positionTarget = document.getElementById('positionTarget');
+    const ghostBox = document.getElementById('ghostBox');
+    const positionHint = document.getElementById('positionHint');
+    const positionCode = document.getElementById('positionCode');
+
+    const positionTips = {
+      static: 'static：默认排队方式，top/left 写了也不会动。',
+      relative: 'relative：相对自己原来的位置移动，虚线原位仍然保留。',
+      absolute: 'absolute：脱离文档流，相对灰色父容器定位，后面的盒子会顶上来。',
+      fixed: 'fixed：脱离当前容器，固定在浏览器窗口右下角，滚动页面也不动。'
+    };
+
+    function resetPositionTarget() {
+      positionTarget.style.position = 'static';
+      positionTarget.style.top = 'auto';
+      positionTarget.style.left = 'auto';
+      positionTarget.style.right = 'auto';
+      positionTarget.style.bottom = 'auto';
+      positionTarget.style.marginTop = '36px';
+      positionTarget.style.zIndex = 'auto';
+    }
+
+    function updatePosition() {
+      const mode = positionMode.value;
+      const top = positionTop.value;
+      const left = positionLeft.value;
+
+      resetPositionTarget();
+      positionTarget.style.position = mode;
+      ghostBox.style.visibility = mode === 'static' ? 'hidden' : 'visible';
+
+      if (mode === 'relative' || mode === 'absolute') {
+        positionTarget.style.top = top;
+        positionTarget.style.left = left;
+      }
+
+      if (mode === 'absolute') {
+        positionTarget.style.marginTop = '0';
+      }
+
+      if (mode === 'fixed') {
+        positionTarget.style.right = '24px';
+        positionTarget.style.bottom = '24px';
+        positionTarget.style.marginTop = '0';
+        positionTarget.style.zIndex = '20';
+      }
+
+      positionTarget.textContent = mode;
+      positionHint.textContent = positionTips[mode];
+
+      if (mode === 'fixed') {
+        positionCode.textContent = `position: fixed;\nright: 24px;\nbottom: 24px;`;
+      } else if (mode === 'static') {
+        positionCode.textContent = `position: static;\n/* top 和 left 不生效 */`;
+      } else {
+        positionCode.textContent = `position: ${mode};\ntop: ${top};\nleft: ${left};`;
+      }
+    }
+
+    [positionMode, positionTop, positionLeft].forEach(el => {
+      el.addEventListener('change', updatePosition);
+    });
+    updatePosition();
+
+    // Sticky
+    const stickyHeader = document.getElementById('stickyHeader');
+    const stickyTop = document.getElementById('stickyTop');
+    const toggleSticky = document.getElementById('toggleSticky');
+    let stickyOn = true;
+
+    stickyTop.addEventListener('change', () => {
+      stickyHeader.style.top = stickyTop.value;
+    });
+
+    toggleSticky.addEventListener('click', () => {
+      stickyOn = !stickyOn;
+      stickyHeader.style.position = stickyOn ? 'sticky' : 'relative';
+      toggleSticky.textContent = stickyOn ? '关闭 sticky' : '开启 sticky';
+    });
+
+    // Flex
+    const flexStage = document.getElementById('flexStage');
+    const flexDirection = document.getElementById('flexDirection');
+    const justifyContent = document.getElementById('justifyContent');
+    const alignItems = document.getElementById('alignItems');
+    const flexWrap = document.getElementById('flexWrap');
+
+    function updateFlex() {
+      flexStage.style.flexDirection = flexDirection.value;
+      flexStage.style.justifyContent = justifyContent.value;
+      flexStage.style.alignItems = alignItems.value;
+      flexStage.style.flexWrap = flexWrap.value;
+    }
+
+    [flexDirection, justifyContent, alignItems, flexWrap].forEach(el => {
+      el.addEventListener('change', updateFlex);
+    });
+    updateFlex();
+
+    // Grid
+    const gridStage = document.getElementById('gridStage');
+    const gridCols = document.getElementById('gridCols');
+    const gridGap = document.getElementById('gridGap');
+    const toggleFeature = document.getElementById('toggleFeature');
+    const featureCard = document.getElementById('featureCard');
+    let featured = false;
+
+    function updateGrid() {
+      gridStage.style.gridTemplateColumns = `repeat(${gridCols.value}, 1fr)`;
+      gridStage.style.gap = gridGap.value;
+    }
+
+    gridCols.addEventListener('change', updateGrid);
+    gridGap.addEventListener('change', updateGrid);
+
+    toggleFeature.addEventListener('click', () => {
+      featured = !featured;
+      if (featured) {
+        featureCard.style.gridColumn = 'span 2';
+        featureCard.style.gridRow = 'span 2';
+        featureCard.textContent = '2（跨 2 列 2 行）';
+      } else {
+        featureCard.style.gridColumn = 'auto';
+        featureCard.style.gridRow = 'auto';
+        featureCard.textContent = '2';
+      }
+    });
+
+    updateGrid();
+  </script>
+</body>
+</html>
