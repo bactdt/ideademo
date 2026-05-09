@@ -223,3 +223,5 @@ DOMAIN-SUFFIX,sider.ai
 # DOMAIN-KEYWORD,hcompany
 # Groq LPU 推理
 # DOMAIN-KEYWORD,groq
+# perplexity.ai
+DOMAIN-SUFFIX,perplexity.ai
