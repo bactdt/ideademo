@@ -1,0 +1,74 @@
+# =====================
+# OpenAI / ChatGPT
+# =====================
+# Datadog 浏览器监控
+DOMAIN,browser-intake-datadoghq.com
+# ChatGPT Cloudflare CDN
+DOMAIN,chat.openai.com.cdn.cloudflare.net
+# Arkose Labs 人机验证
+DOMAIN,openai-api.arkoselabs.com
+# OpenAI API 在 Azure Front Door 的入口
+DOMAIN,openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net
+# OpenAI 静态资源存储（Blob）
+DOMAIN,openaicomproductionae4b.blob.core.windows.net
+# OpenAI 静态资源 AzureEdge CDN
+DOMAIN,production-openaicom-storage.azureedge.net
+# Cloudflare Insights 统计
+DOMAIN,static.cloudflareinsights.com
+
+# ChatGPT / ai.com 短域名
+DOMAIN-SUFFIX,ai.com
+# Algolia 搜索服务
+DOMAIN-SUFFIX,algolia.net
+# Statsig A/B 实验平台
+DOMAIN-SUFFIX,api.statsig.com
+# Auth0 身份认证
+DOMAIN-SUFFIX,auth0.com
+# ChatGPT 新域名
+DOMAIN-SUFFIX,chatgpt.com
+# ChatGPT 实时音视频（LiveKit）
+DOMAIN-SUFFIX,chatgpt.livekit.cloud
+# Arkose Labs 客户端 API
+DOMAIN-SUFFIX,client-api.arkoselabs.com
+# Statsig 事件上报
+DOMAIN-SUFFIX,events.statsigapi.net
+# FeatureGates 实验开关
+DOMAIN-SUFFIX,featuregates.org
+# LiveKit 媒体服务器
+DOMAIN-SUFFIX,host.livekit.cloud
+# IdenTrust 证书链
+DOMAIN-SUFFIX,identrust.com
+# Intercom 在线客服
+DOMAIN-SUFFIX,intercom.io
+DOMAIN-SUFFIX,intercomcdn.com
+# LaunchDarkly 灯塔（特性开关）
+DOMAIN-SUFFIX,launchdarkly.com
+# OpenAI 静态资源
+DOMAIN-SUFFIX,oaistatic.com
+# ChatGPT 附件 / 图片等用户内容
+DOMAIN-SUFFIX,oaiusercontent.com
+# ObserveIT 行为监控
+DOMAIN-SUFFIX,observeit.net
+# OpenAI 官网
+DOMAIN-SUFFIX,openai.com
+# OpenAI AzureEdge 站点
+DOMAIN-SUFFIX,openaiapi-site.azureedge.net
+# OpenAI 图像/CDN
+DOMAIN-SUFFIX,openaicom.imgix.net
+# Segment 分析
+DOMAIN-SUFFIX,segment.io
+# Sentry 错误上报
+DOMAIN-SUFFIX,sentry.io
+# Stripe 支付
+DOMAIN-SUFFIX,stripe.com
+# LiveKit TURN 服务器
+DOMAIN-SUFFIX,turn.livekit.cloud
+
+# 域名关键字匹配 openai
+DOMAIN-KEYWORD,openai
+
+# OpenAI / ChatGPT 相关的 IP 段
+IP-CIDR,24.199.123.28/32,no-resolve
+IP-CIDR,64.23.132.171/32,no-resolve
+# AS20473 部分用于 OpenAI/ChatGPT 接入
+IP-ASN,20473,no-resolve
