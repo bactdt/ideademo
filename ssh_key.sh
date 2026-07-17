@@ -2,7 +2,7 @@
 # =============================================================================
 # 脚本名称: ssh_key.sh
 # 描    述: SSH 密钥管理工具 - 托管密钥同步、SSHD 配置、防火墙、fail2ban
-# 版    本: v1.5 (修复 stdin EOF 死循环；pad_to 改为纯 bash 实现)
+# 版    本: v1.6 (认证策略显式化、SSHD 生效值校验与回滚保护)
 # =============================================================================
 set -euo pipefail
 IFS=$'\n\t'
@@ -35,16 +35,27 @@ SSH_KEYS=(
 MANAGED_BEGIN='# ==== BEGIN MANAGED BY ssh_key.sh ===='
 MANAGED_END='# ==== END MANAGED BY ssh_key.sh ===='
 SSHD_MAIN="/etc/ssh/sshd_config"
+SSHD_AUTH_BEGIN='# ==== BEGIN SSH AUTH MANAGED BY ssh_key.sh ===='
+SSHD_AUTH_END='# ==== END SSH AUTH MANAGED BY ssh_key.sh ===='
+SSHD_BIN="${SSHD_BIN:-}"
 
 TARGET_USER="${TARGET_USER:-root}"
 TARGET_HOME=""
 AUTH_KEYS_FILE=""
 CURRENT_SSH_PORT="22"
 PENDING_SSH_PORT=""
-# 当前值从 sshd_config 读取；DISABLE_PASSWORD 作为“待应用”的期望值，避免被状态刷新覆盖
-CURRENT_DISABLE_PASSWORD="no"
-DISABLE_PASSWORD="no"
+# 认证项影响整个 sshd；TARGET_USER 仅用于 managed authorized_keys 和安全检查。
+CURRENT_PASSWORD_AUTH="unknown"
+CURRENT_PUBKEY_AUTH="unknown"
+CURRENT_KBDINT_AUTH="unknown"
+CURRENT_PERMIT_ROOT_LOGIN="unknown"
+CURRENT_AUTHENTICATION_METHODS="unknown"
+PASSWORD_AUTH="yes"
+PUBKEY_AUTH="yes"
+KBDINT_AUTH="yes"
 PASSWORD_TOUCHED=0
+PUBKEY_TOUCHED=0
+KBDINT_TOUCHED=0
 
 # ===================== 临时文件清理 =====================
 TEMP_FILES=()
@@ -289,18 +300,430 @@ refresh_paths() {
   AUTH_KEYS_FILE="$TARGET_HOME/.ssh/authorized_keys"
 }
 
-sync_state_from_sshd() {
-  # 在 set -euo pipefail 下，grep 找不到匹配会返回 1，导致整个脚本直接退出。
-  # 这里把“未匹配”视为正常情况（使用默认值）。
-  CURRENT_SSH_PORT=$( (grep -E "^Port\s+" "$SSHD_MAIN" 2>/dev/null || true) | awk '{print $2}' | head -1 )
-  [[ -z "$CURRENT_SSH_PORT" ]] && CURRENT_SSH_PORT="22"
+find_sshd_binary() {
+  if command -v sshd >/dev/null 2>&1; then
+    command -v sshd
+    return 0
+  fi
+  [[ -x "/usr/sbin/sshd" ]] && { printf '%s\n' "/usr/sbin/sshd"; return 0; }
+  return 1
+}
 
-  local pwd_auth
-  pwd_auth=$( (grep -E "^PasswordAuthentication\s+" "$SSHD_MAIN" 2>/dev/null || true) | awk '{print $2}' | head -1 )
-  [[ "$pwd_auth" == "no" ]] && CURRENT_DISABLE_PASSWORD="yes" || CURRENT_DISABLE_PASSWORD="no"
-  # 如果用户还没做“切换密码登录”，则让待应用值跟随当前值；一旦切换过，就不再被刷新覆盖
-  if [[ "${PASSWORD_TOUCHED:-0}" -eq 0 ]]; then
-    DISABLE_PASSWORD="$CURRENT_DISABLE_PASSWORD"
+ensure_sshd_binary() {
+  if [[ -n "$SSHD_BIN" ]]; then
+    command -v "$SSHD_BIN" >/dev/null 2>&1 || [[ -x "$SSHD_BIN" ]] || die "找不到 sshd: $SSHD_BIN"
+    SSHD_BIN="$(command -v "$SSHD_BIN" 2>/dev/null || printf '%s\n' "$SSHD_BIN")"
+    return 0
+  fi
+  SSHD_BIN="$(find_sshd_binary)" || die "未找到 sshd，无法读取或校验 SSHD 配置"
+}
+
+sshd_effective_values() {
+  local option="$1"
+  "$SSHD_BIN" -T -f "$SSHD_MAIN" 2>/dev/null | awk -v option="$option" '$1 == option { print $2 }'
+}
+
+sshd_effective_value() {
+  local option="$1"
+  sshd_effective_values "$option" | head -1
+}
+
+sshd_effective_arguments() {
+  local option="$1"
+  "$SSHD_BIN" -T -f "$SSHD_MAIN" 2>/dev/null | awk -v option="$option" '
+    $1 == option {
+      $1=""
+      sub(/^[[:space:]]+/, "")
+      print
+      exit
+    }
+  '
+}
+
+normalize_yes_no() {
+  case "$1" in
+    yes|no) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "unknown" ;;
+  esac
+}
+
+auth_state_label() {
+  case "$1" in
+    yes) printf '%s\n' "启用" ;;
+    no) printf '%s\n' "禁用" ;;
+    *) printf '%s\n' "未知" ;;
+  esac
+}
+
+authentication_methods_label() {
+  case "$CURRENT_AUTHENTICATION_METHODS" in
+    any) printf '%s\n' "默认(any)" ;;
+    unknown) printf '%s\n' "未知" ;;
+    *) printf '%s\n' "自定义(拒绝自动修改)" ;;
+  esac
+}
+
+sshd_config_files() {
+  local file
+  printf '%s\n' "$SSHD_MAIN"
+  for file in "${SSHD_MAIN}.d/"*; do
+    [[ -f "$file" ]] && printf '%s\n' "$file"
+  done
+}
+
+sshd_include_paths() {
+  local file="$1"
+  awk '
+    tolower($1) == "include" {
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^#/) break
+        print $i
+      }
+    }
+  ' "$file"
+}
+
+is_supported_include_path() {
+  local include_path="$1" ssh_dir
+  ssh_dir="$(dirname "$SSHD_MAIN")"
+  case "$include_path" in
+    "${SSHD_MAIN}.d/"*|"$ssh_dir/sshd_config.d/"*|"sshd_config.d/"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+has_unmanaged_include() {
+  local file include_path
+  while IFS= read -r file; do
+    while IFS= read -r include_path; do
+      [[ -n "$include_path" ]] || continue
+      is_supported_include_path "$include_path" || return 0
+    done < <(sshd_include_paths "$file")
+  done < <(sshd_config_files)
+  return 1
+}
+
+has_active_match_rule() {
+  local file
+  while IFS= read -r file; do
+    if awk 'tolower($1) == "match" { found=1 } END { exit !found }' "$file"; then
+      return 0
+    fi
+  done < <(sshd_config_files)
+  return 1
+}
+
+authorized_keys_file_is_effective() {
+  refresh_paths
+  local configured_paths path old_ifs
+  local -a paths=()
+  configured_paths="$(sshd_effective_arguments authorizedkeysfile || true)"
+  [[ -n "$configured_paths" && "$configured_paths" != "none" ]] || return 1
+
+  old_ifs="$IFS"
+  IFS=$' \t' read -r -a paths <<< "$configured_paths"
+  IFS="$old_ifs"
+  for path in "${paths[@]}"; do
+    [[ "$path" == "none" ]] && continue
+    path="${path//%h/$TARGET_HOME}"
+    path="${path//%u/$TARGET_USER}"
+    [[ "$path" == /* ]] || path="$TARGET_HOME/$path"
+    [[ "$path" == "$AUTH_KEYS_FILE" ]] && return 0
+  done
+  return 1
+}
+
+has_usable_authorized_key() {
+  refresh_paths
+  authorized_keys_file_is_effective || return 1
+  command -v ssh-keygen >/dev/null 2>&1 || return 1
+  [[ -s "$AUTH_KEYS_FILE" ]] || return 1
+  ssh-keygen -lf "$AUTH_KEYS_FILE" >/dev/null 2>&1
+}
+
+managed_auth_block_is_well_formed() {
+  awk -v begin="$SSHD_AUTH_BEGIN" -v end="$SSHD_AUTH_END" '
+    BEGIN { ok=1; inside=0; begins=0; ends=0 }
+    $0 == begin {
+      if (inside || begins >= 1) ok=0
+      inside=1
+      begins++
+      next
+    }
+    $0 == end {
+      if (!inside || ends >= 1) ok=0
+      inside=0
+      ends++
+      next
+    }
+    END { exit !(ok && !inside && begins == ends && begins <= 1) }
+  ' "$SSHD_MAIN"
+}
+
+copy_file_preserving_metadata() {
+  local source="$1" destination="$2"
+  if cp --preserve=all "$source" "$destination" 2>/dev/null; then
+    return 0
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]] && cp -p "$source" "$destination"; then
+    return 0
+  fi
+  warn "无法保留 $source 的完整元数据，已拒绝替换 SSHD 配置"
+  return 1
+}
+
+prepare_sshd_temp() {
+  local tmp="$1"
+  [[ -f "$SSHD_MAIN" && ! -L "$SSHD_MAIN" ]] || {
+    warn "$SSHD_MAIN 不是可安全替换的常规文件"
+    return 1
+  }
+  copy_file_preserving_metadata "$SSHD_MAIN" "$tmp"
+}
+
+replace_sshd_main_from() {
+  local source="$1" tmp
+  [[ -f "$source" ]] || return 1
+  tmp="$(mktemp "${SSHD_MAIN}.tmp.XXXXXX")" || return 1
+  TEMP_FILES+=("$tmp")
+  prepare_sshd_temp "$tmp" || return 1
+  copy_file_preserving_metadata "$source" "$tmp" || return 1
+  mv -f "$tmp" "$SSHD_MAIN"
+}
+
+write_managed_auth_block() {
+  managed_auth_block_is_well_formed || {
+    warn "检测到损坏、倒置或重复的 ssh_key.sh 认证配置块，已拒绝覆盖"
+    return 1
+  }
+
+  local tmp
+  tmp="$(mktemp "${SSHD_MAIN}.tmp.XXXXXX")" || {
+    warn "无法创建 SSHD 配置临时文件"
+    return 1
+  }
+  TEMP_FILES+=("$tmp")
+  prepare_sshd_temp "$tmp" || return 1
+
+  # sshd 对多数配置项采用首次出现的值，因此托管块必须位于 Include 之前。
+  {
+    printf '%s\n' "$SSHD_AUTH_BEGIN"
+    printf 'PasswordAuthentication %s\n' "$PASSWORD_AUTH"
+    printf 'KbdInteractiveAuthentication %s\n' "$KBDINT_AUTH"
+    printf 'PubkeyAuthentication %s\n' "$PUBKEY_AUTH"
+    printf '%s\n' "$SSHD_AUTH_END"
+    awk -v begin="$SSHD_AUTH_BEGIN" -v end="$SSHD_AUTH_END" '
+      $0 == begin { managed=1; next }
+      managed && $0 == end { managed=0; next }
+      !managed { print }
+    ' "$SSHD_MAIN"
+  } > "$tmp" || {
+    warn "写入 SSHD 认证配置失败"
+    return 1
+  }
+
+  mv -f "$tmp" "$SSHD_MAIN"
+}
+
+has_port_directive_outside_main() {
+  local file
+  while IFS= read -r file; do
+    [[ "$file" == "$SSHD_MAIN" ]] && continue
+    if awk 'tolower($1) == "port" { found=1 } END { exit !found }' "$file"; then
+      return 0
+    fi
+  done < <(sshd_config_files)
+  return 1
+}
+
+update_sshd_port() {
+  local port="$1" tmp
+  tmp="$(mktemp "${SSHD_MAIN}.tmp.XXXXXX")" || {
+    warn "无法创建 SSHD 配置临时文件"
+    return 1
+  }
+  TEMP_FILES+=("$tmp")
+  prepare_sshd_temp "$tmp" || return 1
+
+  awk -v port="$port" '
+    tolower($1) == "port" {
+      if (!changed) {
+        print "Port " port
+        changed=1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!changed) print "Port " port
+    }
+  ' "$SSHD_MAIN" > "$tmp" || {
+    warn "写入 SSHD 端口配置失败"
+    return 1
+  }
+
+  mv -f "$tmp" "$SSHD_MAIN"
+}
+
+validate_sshd_config() {
+  local output
+  if ! output="$("$SSHD_BIN" -t -f "$SSHD_MAIN" 2>&1)"; then
+    warn "sshd_config 校验失败: ${output:-未返回错误详情}"
+    return 1
+  fi
+  return 0
+}
+
+verify_effective_authentication() {
+  local password_auth pubkey_auth kbdint_auth
+  password_auth="$(sshd_effective_value passwordauthentication || true)"
+  pubkey_auth="$(sshd_effective_value pubkeyauthentication || true)"
+  kbdint_auth="$(sshd_effective_value kbdinteractiveauthentication || true)"
+
+  [[ "$password_auth" == "$PASSWORD_AUTH" ]] || {
+    warn "PasswordAuthentication 实际值为 ${password_auth:-未知}，不是期望值 $PASSWORD_AUTH"
+    return 1
+  }
+  [[ "$pubkey_auth" == "$PUBKEY_AUTH" ]] || {
+    warn "PubkeyAuthentication 实际值为 ${pubkey_auth:-未知}，不是期望值 $PUBKEY_AUTH"
+    return 1
+  }
+  [[ "$kbdint_auth" == "$KBDINT_AUTH" ]] || {
+    warn "KbdInteractiveAuthentication 实际值为 ${kbdint_auth:-未知}，不是期望值 $KBDINT_AUTH"
+    return 1
+  }
+}
+
+verify_effective_port() {
+  [[ -n "$PENDING_SSH_PORT" ]] || return 0
+  local ports
+  ports="$(sshd_effective_values port | paste -sd ',' - 2>/dev/null || true)"
+  [[ "$ports" == "$PENDING_SSH_PORT" ]] || {
+    warn "SSH 端口实际值为 ${ports:-未知}，不是期望值 $PENDING_SSH_PORT"
+    return 1
+  }
+}
+
+reload_sshd() {
+  systemctl reload sshd 2>/dev/null || \
+    systemctl reload ssh 2>/dev/null || \
+    service ssh reload 2>/dev/null || \
+    service sshd reload 2>/dev/null
+}
+
+restore_sshd_backup() {
+  [[ -n "${LAST_SSHD_BACKUP:-}" && -f "$LAST_SSHD_BACKUP" ]] || return 1
+  replace_sshd_main_from "$LAST_SSHD_BACKUP" || return 1
+  warn "已恢复 SSHD 配置备份: $LAST_SSHD_BACKUP"
+}
+
+firewall_port_is_open() {
+  local port="$1" backend="$2"
+  case "$backend" in
+    ufw)       ufw status 2>/dev/null | grep -Fq "$port/tcp" ;;
+    firewalld) firewall-cmd --permanent --query-port="$port/tcp" >/dev/null 2>&1 ;;
+    iptables)  iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null ;;
+    none)      return 1 ;;
+    *)         return 2 ;;
+  esac
+}
+
+rollback_sshd_transaction() {
+  local opened_firewall_port="${1:-}"
+  restore_sshd_backup || warn "自动恢复 SSHD 配置失败"
+  if [[ -n "$opened_firewall_port" ]]; then
+    close_port_firewall "$opened_firewall_port" || warn "无法撤销新端口 $opened_firewall_port/tcp 的防火墙规则"
+  fi
+}
+
+require_confirmation() {
+  local prompt="$1" answer
+  read -r -p "$prompt 输入 YES 继续: " answer || return 1
+  [[ "$answer" == "YES" ]] || {
+    warn "操作已取消"
+    return 1
+  }
+}
+
+validate_auth_transition() {
+  if [[ "$PASSWORD_AUTH" != "yes" && "$PASSWORD_AUTH" != "no" ]] || \
+     [[ "$PUBKEY_AUTH" != "yes" && "$PUBKEY_AUTH" != "no" ]] || \
+     [[ "$KBDINT_AUTH" != "yes" && "$KBDINT_AUTH" != "no" ]]; then
+    warn "认证待应用值只能为 yes 或 no"
+    return 1
+  fi
+  if has_unmanaged_include; then
+    warn "检测到无法完整检查的 Include 路径；为避免忽略条件策略，脚本拒绝自动修改认证项"
+    return 1
+  fi
+  if has_active_match_rule; then
+    warn "检测到 Match 规则；为避免覆盖条件认证策略，脚本拒绝自动修改认证项"
+    return 1
+  fi
+  if [[ "$CURRENT_AUTHENTICATION_METHODS" != "any" ]]; then
+    warn "AuthenticationMethods=${CURRENT_AUTHENTICATION_METHODS}；脚本只管理默认认证组合"
+    return 1
+  fi
+  if [[ "$PASSWORD_AUTH" == "no" && "$PUBKEY_AUTH" == "no" && "$KBDINT_AUTH" == "no" ]]; then
+    warn "不能同时禁用密码、密钥和键盘交互认证，否则可能没有可用的 SSH 登录方式"
+    return 1
+  fi
+
+  if [[ "$PASSWORD_AUTH" == "no" && "$KBDINT_AUTH" == "no" ]]; then
+    if ! authorized_keys_file_is_effective; then
+      warn "拒绝关闭全部密码类认证：sshd 的 AuthorizedKeysFile 未包含 $AUTH_KEYS_FILE"
+      return 1
+    fi
+    if ! has_usable_authorized_key; then
+      warn "拒绝关闭全部密码类认证：$AUTH_KEYS_FILE 中没有可验证的公钥"
+      return 1
+    fi
+    if [[ "$CURRENT_PASSWORD_AUTH" != "no" || "$CURRENT_KBDINT_AUTH" != "no" ]]; then
+      require_confirmation "请先在另一 SSH 会话验证 $TARGET_USER 的密钥登录。"
+    fi
+  fi
+
+  if [[ "$PUBKEY_AUTH" == "no" ]]; then
+    if [[ "$TARGET_USER" == "root" && "$CURRENT_PERMIT_ROOT_LOGIN" != "yes" ]]; then
+      warn "拒绝禁用公钥认证：root 的 PermitRootLogin=${CURRENT_PERMIT_ROOT_LOGIN}，非密钥登录不是可靠回退方式"
+      return 1
+    fi
+    if [[ "$CURRENT_PUBKEY_AUTH" != "no" ]]; then
+      require_confirmation "请先在另一 SSH 会话验证 $TARGET_USER 的非密钥登录。"
+    fi
+  fi
+}
+
+sync_state_from_sshd() {
+  ensure_sshd_binary
+  if ! validate_sshd_config; then
+    CURRENT_SSH_PORT="unknown"
+    CURRENT_PASSWORD_AUTH="unknown"
+    CURRENT_PUBKEY_AUTH="unknown"
+    CURRENT_KBDINT_AUTH="unknown"
+    CURRENT_PERMIT_ROOT_LOGIN="unknown"
+    CURRENT_AUTHENTICATION_METHODS="unknown"
+    return 0
+  fi
+
+  CURRENT_SSH_PORT="$(sshd_effective_values port | paste -sd ',' - 2>/dev/null || true)"
+  [[ -n "$CURRENT_SSH_PORT" ]] || CURRENT_SSH_PORT="unknown"
+  CURRENT_PASSWORD_AUTH="$(normalize_yes_no "$(sshd_effective_value passwordauthentication || true)")"
+  CURRENT_PUBKEY_AUTH="$(normalize_yes_no "$(sshd_effective_value pubkeyauthentication || true)")"
+  CURRENT_KBDINT_AUTH="$(normalize_yes_no "$(sshd_effective_value kbdinteractiveauthentication || true)")"
+  CURRENT_PERMIT_ROOT_LOGIN="$(sshd_effective_value permitrootlogin || true)"
+  [[ -n "$CURRENT_PERMIT_ROOT_LOGIN" ]] || CURRENT_PERMIT_ROOT_LOGIN="unknown"
+  CURRENT_AUTHENTICATION_METHODS="$(sshd_effective_value authenticationmethods || true)"
+  [[ -n "$CURRENT_AUTHENTICATION_METHODS" ]] || CURRENT_AUTHENTICATION_METHODS="unknown"
+
+  if [[ "$PASSWORD_TOUCHED" -eq 0 && "$CURRENT_PASSWORD_AUTH" != "unknown" ]]; then
+    PASSWORD_AUTH="$CURRENT_PASSWORD_AUTH"
+  fi
+  if [[ "$PUBKEY_TOUCHED" -eq 0 && "$CURRENT_PUBKEY_AUTH" != "unknown" ]]; then
+    PUBKEY_AUTH="$CURRENT_PUBKEY_AUTH"
+  fi
+  if [[ "$KBDINT_TOUCHED" -eq 0 && "$CURRENT_KBDINT_AUTH" != "unknown" ]]; then
+    KBDINT_AUTH="$CURRENT_KBDINT_AUTH"
   fi
 }
 
@@ -308,19 +731,29 @@ sync_state_from_sshd() {
 show_status() {
   sync_state_from_sshd
   refresh_paths
-  
-  local fw_backend
+
+  local fw_backend match_state
   fw_backend="$(detect_firewall_backend)"
-  
+  match_state="未检测到"
+  has_active_match_rule && match_state="已检测到(拒绝自动修改)"
+
   print_header "SSH 密钥管理工具 - 状态面板"
   print_row "目标用户" "$TARGET_USER"
   print_row "用户主目录" "$TARGET_HOME"
   print_row "authorized_keys" "$AUTH_KEYS_FILE"
+  print_row "认证策略范围" "全局"
   print_menu_sep
   print_row "当前 SSH 端口" "$CURRENT_SSH_PORT"
   print_row "待应用端口" "${PENDING_SSH_PORT:-(无)}"
-  print_row "密码登录(当前禁用?)" "$CURRENT_DISABLE_PASSWORD"
-  print_row "密码登录(待应用禁用?)" "$DISABLE_PASSWORD"
+  print_row "密码认证(有效)" "$(auth_state_label "$CURRENT_PASSWORD_AUTH")"
+  print_row "密钥认证(有效)" "$(auth_state_label "$CURRENT_PUBKEY_AUTH")"
+  print_row "键盘交互(有效)" "$(auth_state_label "$CURRENT_KBDINT_AUTH")"
+  print_row "密码认证(待应用)" "$(auth_state_label "$PASSWORD_AUTH")"
+  print_row "密钥认证(待应用)" "$(auth_state_label "$PUBKEY_AUTH")"
+  print_row "键盘交互(待应用)" "$(auth_state_label "$KBDINT_AUTH")"
+  [[ "$TARGET_USER" == "root" ]] && print_row "PermitRootLogin" "$CURRENT_PERMIT_ROOT_LOGIN"
+  print_row "认证组合" "$(authentication_methods_label)"
+  print_row "Match 规则" "$match_state"
   print_menu_sep
   print_row "防火墙后端" "$fw_backend"
   print_row "托管公钥数量" "${#SSH_KEYS[@]}"
@@ -390,72 +823,170 @@ show_authorized_keys() {
   print_line
 }
 
-toggle_disable_password() {
+toggle_password_auth() {
+  local next="$PASSWORD_AUTH"
+  [[ "$next" == "yes" ]] && next="no" || next="yes"
+  if [[ "$next" == "no" && "$PUBKEY_AUTH" == "no" && "$KBDINT_AUTH" == "no" ]]; then
+    warn "不能同时禁用密码、密钥和键盘交互认证"
+    return 0
+  fi
+  PASSWORD_AUTH="$next"
   PASSWORD_TOUCHED=1
-  [[ "$DISABLE_PASSWORD" == "yes" ]] && DISABLE_PASSWORD="no" || DISABLE_PASSWORD="yes"
-  log "禁用密码登录(待应用) = $DISABLE_PASSWORD (需应用配置生效)"
+  log "密码认证(待应用) = $PASSWORD_AUTH"
+}
+
+toggle_pubkey_auth() {
+  local next="$PUBKEY_AUTH"
+  [[ "$next" == "yes" ]] && next="no" || next="yes"
+  if [[ "$next" == "no" && "$PASSWORD_AUTH" == "no" && "$KBDINT_AUTH" == "no" ]]; then
+    warn "不能同时禁用密码、密钥和键盘交互认证"
+    return 0
+  fi
+  PUBKEY_AUTH="$next"
+  PUBKEY_TOUCHED=1
+  log "密钥认证(待应用) = $PUBKEY_AUTH"
+}
+
+toggle_kbdint_auth() {
+  local next="$KBDINT_AUTH"
+  [[ "$next" == "yes" ]] && next="no" || next="yes"
+  if [[ "$next" == "no" && "$PASSWORD_AUTH" == "no" && "$PUBKEY_AUTH" == "no" ]]; then
+    warn "不能同时禁用密码、密钥和键盘交互认证"
+    return 0
+  fi
+  KBDINT_AUTH="$next"
+  KBDINT_TOUCHED=1
+  log "键盘交互认证(待应用) = $KBDINT_AUTH"
 }
 
 set_ssh_port() {
   read -r -p "输入新的 SSH 端口 [当前: $CURRENT_SSH_PORT]: " new_port || return 0
-  [[ -z "$new_port" ]] && { log "保持当前端口"; return; }
-  validate_port "$new_port" || { warn "端口无效"; return; }
+  [[ -z "$new_port" ]] && { log "保持当前端口"; return 0; }
+  validate_port "$new_port" || { warn "端口无效"; return 0; }
   PENDING_SSH_PORT="$new_port"
   log "待应用端口: $PENDING_SSH_PORT"
 }
 
 apply_sshd_config() {
   require_root
-  backup_file "$SSHD_MAIN"
-  
-  grep -q "^PubkeyAuthentication" "$SSHD_MAIN" && \
-    sed -i 's/^PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_MAIN" || \
-    echo "PubkeyAuthentication yes" >> "$SSHD_MAIN"
-  
-  if [[ "$DISABLE_PASSWORD" == "yes" ]]; then
-    grep -q "^PasswordAuthentication" "$SSHD_MAIN" && \
-      sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_MAIN" || \
-      echo "PasswordAuthentication no" >> "$SSHD_MAIN"
-    grep -q "^ChallengeResponseAuthentication" "$SSHD_MAIN" && \
-      sed -i 's/^ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$SSHD_MAIN"
-    log "已禁用密码登录"
-  else
-    grep -q "^PasswordAuthentication" "$SSHD_MAIN" && \
-      sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' "$SSHD_MAIN"
-    log "已允许密码登录"
+  ensure_sshd_binary
+  sync_state_from_sshd
+
+  if ! validate_auth_transition; then
+    return 0
   fi
-  
-  if [[ -n "${PENDING_SSH_PORT:-}" ]]; then
-    open_port_firewall "$PENDING_SSH_PORT" || warn "防火墙放行可能失败"
-    grep -q "^Port" "$SSHD_MAIN" && \
-      sed -i "s/^Port.*/Port $PENDING_SSH_PORT/" "$SSHD_MAIN" || \
-      echo "Port $PENDING_SSH_PORT" >> "$SSHD_MAIN"
-    log "SSH 端口: $PENDING_SSH_PORT"
-    CURRENT_SSH_PORT="$PENDING_SSH_PORT"
-    PENDING_SSH_PORT=""
+  if [[ -n "$PENDING_SSH_PORT" ]] && has_port_directive_outside_main; then
+    warn "检测到 Include 配置中的 Port 指令；脚本拒绝混合修改端口，避免留下多个监听端口"
+    return 0
   fi
-  
-  systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || warn "SSHD 重启失败"
-  log "SSHD 配置已应用"
+  if ! backup_file "$SSHD_MAIN"; then
+    warn "无法备份 $SSHD_MAIN，已取消应用"
+    return 0
+  fi
+  LAST_SSHD_BACKUP="$LAST_BACKUP"
+  if ! write_managed_auth_block; then
+    warn "认证配置未写入"
+    return 0
+  fi
+
+  local opened_firewall_port=""
+  if [[ -n "$PENDING_SSH_PORT" ]]; then
+    local fw_backend firewall_state
+    fw_backend="$(detect_firewall_backend)"
+    if [[ "$fw_backend" == "none" ]]; then
+      warn "未检测到活动防火墙，请确认 $PENDING_SSH_PORT/tcp 可从外部访问"
+    elif firewall_port_is_open "$PENDING_SSH_PORT" "$fw_backend"; then
+      :
+    else
+      firewall_state=$?
+      if [[ "$firewall_state" -ne 1 ]]; then
+        warn "无法安全判断 $fw_backend 的端口规则，已恢复 SSHD 配置"
+        rollback_sshd_transaction
+        return 0
+      fi
+      if ! open_port_firewall "$PENDING_SSH_PORT"; then
+        warn "新端口防火墙放行失败，已恢复 SSHD 配置"
+        rollback_sshd_transaction
+        return 0
+      fi
+      opened_firewall_port="$PENDING_SSH_PORT"
+    fi
+
+    if ! update_sshd_port "$PENDING_SSH_PORT"; then
+      warn "SSH 端口配置未写入，已恢复 SSHD 配置"
+      rollback_sshd_transaction "$opened_firewall_port"
+      return 0
+    fi
+  fi
+
+  if ! validate_sshd_config; then
+    warn "新 SSHD 配置未通过校验，已恢复备份"
+    rollback_sshd_transaction "$opened_firewall_port"
+    return 0
+  fi
+  if ! verify_effective_authentication; then
+    warn "认证配置未按预期生效，已恢复备份"
+    rollback_sshd_transaction "$opened_firewall_port"
+    return 0
+  fi
+  if ! verify_effective_port; then
+    warn "端口配置未按预期生效，已恢复备份"
+    rollback_sshd_transaction "$opened_firewall_port"
+    return 0
+  fi
+  if ! reload_sshd; then
+    warn "SSHD 重载失败，正在恢复备份"
+    rollback_sshd_transaction "$opened_firewall_port"
+    if validate_sshd_config; then
+      reload_sshd || warn "恢复后的 SSHD 配置也未能重载，请立即在当前控制台检查服务"
+    fi
+    return 0
+  fi
+
+  [[ -n "$PENDING_SSH_PORT" ]] && log "SSH 端口已切换为: $PENDING_SSH_PORT"
+  PENDING_SSH_PORT=""
+  PASSWORD_TOUCHED=0
+  PUBKEY_TOUCHED=0
+  KBDINT_TOUCHED=0
+  sync_state_from_sshd
+  log "SSHD 配置已应用：密码认证=$PASSWORD_AUTH，密钥认证=$PUBKEY_AUTH，键盘交互认证=$KBDINT_AUTH"
 }
 
 # ===================== 备份回滚 =====================
 LAST_BACKUP=""
+LAST_SSHD_BACKUP=""
 backup_file() {
   local file="$1"
   [[ -f "$file" ]] || return 0
   local backup="${file}.bak.$(date +%Y%m%d%H%M%S)"
-  cp "$file" "$backup"
+  copy_file_preserving_metadata "$file" "$backup" || return 1
   LAST_BACKUP="$backup"
   log "已备份: $backup"
 }
 
+backup_sshd_config() {
+  if backup_file "$SSHD_MAIN"; then
+    LAST_SSHD_BACKUP="$LAST_BACKUP"
+  fi
+}
+
 restore_last_backup() {
-  [[ -z "$LAST_BACKUP" || ! -f "$LAST_BACKUP" ]] && { warn "没有可回滚的备份"; return 1; }
-  local original="${LAST_BACKUP%.bak.*}"
-  cp "$LAST_BACKUP" "$original"
-  log "已回滚: $LAST_BACKUP"
-  systemctl restart sshd 2>/dev/null || service sshd restart 2>/dev/null || true
+  ensure_sshd_binary
+  if [[ -z "$LAST_SSHD_BACKUP" || ! -f "$LAST_SSHD_BACKUP" ]]; then
+    warn "没有可回滚的 SSHD 配置备份"
+    return 0
+  fi
+  if ! replace_sshd_main_from "$LAST_SSHD_BACKUP"; then
+    warn "无法恢复 SSHD 配置备份"
+    return 0
+  fi
+  if ! validate_sshd_config; then
+    warn "恢复后的 SSHD 配置未通过校验，请在当前控制台检查"
+    return 0
+  fi
+  reload_sshd || warn "SSHD 重载失败，请在当前控制台检查服务"
+  log "已回滚 SSHD 配置: $LAST_SSHD_BACKUP"
+  sync_state_from_sshd
 }
 
 # ===================== UFW Docker after.rules =====================
@@ -649,16 +1180,17 @@ main_loop() {
     print_menu_item "[3] 初始化 ~/.ssh       [4] 同步公钥 (只加)"
     print_menu_item "[5] 同步公钥 (覆盖)     [6] 查看 authorized_keys"
     print_menu_sep
-    print_menu_item "[7] 切换密码登录        [8] 设置 SSH 端口"
-    print_menu_item "[9] 应用 SSHD 配置"
+    print_menu_item "[7] 切换密码认证        [8] 切换密钥认证"
+    print_menu_item "[9] 切换键盘交互认证"
+    print_menu_item "[10] 设置 SSH 端口     [11] 应用 SSHD 配置"
     print_menu_sep
-    print_menu_item "[10] 查看防火墙         [11] 添加端口"
-    print_menu_item "[12] 删除端口           [13] 持久化规则"
+    print_menu_item "[12] 查看防火墙         [13] 添加端口"
+    print_menu_item "[14] 删除端口           [15] 持久化规则"
     print_menu_sep
-    print_menu_item "[14] 配置 fail2ban      [15] 查看 fail2ban"
-    print_menu_item "[16] 备份 sshd_config   [17] 回滚 sshd_config"
-    print_menu_item "[18] 安装/启用 UFW (放行SSH)"
-    print_menu_item "[19] UFW Docker 规则配置"
+    print_menu_item "[16] 配置 fail2ban      [17] 查看 fail2ban"
+    print_menu_item "[18] 备份 sshd_config   [19] 回滚 sshd_config"
+    print_menu_item "[20] 安装/启用 UFW (放行SSH)"
+    print_menu_item "[21] UFW Docker 规则配置"
     print_menu_sep
     print_menu_item "[0] 退出"
     print_line
@@ -671,19 +1203,21 @@ main_loop() {
       4) sync_fixed_keys_add_only ;;
       5) sync_fixed_keys_overwrite ;;
       6) show_authorized_keys ;;
-      7) toggle_disable_password ;;
-      8) set_ssh_port ;;
-      9) apply_sshd_config ;;
-      10) show_firewall_rules ;;
-      11) read -r -p "端口: " port || true; [[ -n "$port" ]] && open_port_firewall "$port" ;;
-      12) read -r -p "端口: " port || true; [[ -n "$port" ]] && close_port_firewall "$port" ;;
-      13) persist_iptables_rules ;;
-      14) configure_fail2ban ;;
-      15) show_fail2ban_status ;;
-      16) backup_file "$SSHD_MAIN" ;;
-      17) restore_last_backup ;;
-      18) install_enable_ufw ;;
-      19) configure_ufw_docker_rules_menu ;;
+      7) toggle_password_auth ;;
+      8) toggle_pubkey_auth ;;
+      9) toggle_kbdint_auth ;;
+      10) set_ssh_port ;;
+      11) apply_sshd_config ;;
+      12) show_firewall_rules ;;
+      13) read -r -p "端口: " port || true; [[ -n "$port" ]] && open_port_firewall "$port" ;;
+      14) read -r -p "端口: " port || true; [[ -n "$port" ]] && close_port_firewall "$port" ;;
+      15) persist_iptables_rules ;;
+      16) configure_fail2ban ;;
+      17) show_fail2ban_status ;;
+      18) backup_sshd_config ;;
+      19) restore_last_backup ;;
+      20) install_enable_ufw ;;
+      21) configure_ufw_docker_rules_menu ;;
       0) log "Bye."; exit 0 ;;
       *) warn "无效选项" ;;
     esac
@@ -693,5 +1227,7 @@ main_loop() {
   done
 }
 
-require_root
-main_loop
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  require_root
+  main_loop
+fi
